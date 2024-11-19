@@ -1,0 +1,2191 @@
+---
+title: "Data analysis documentation_V5"
+author: "Christoph Schür, Martin Paparella"
+format: html
+    toc: true
+    number-sections: true
+editor: visual
+---
+
+# BEWARE: THIS IS THE GEOMETRIC MEAN VERSION OF THIS SCRIPT
+
+# 1. Loading of packages
+
+## 1.1. Packages
+
+```{r}
+
+library(tidyverse)
+library(ggridges)
+library(patchwork)
+library(gghalves)
+library(writexl)
+library(ggplot2) 
+library(ggrepel)
+library(scales)
+
+# psych package has an integrated function for the geometric mean
+library(psych)
+
+theme_set(theme_bw(base_size = 14))
+```
+
+# 2. Data preparation
+
+This needs to only be done once. If this is not the first time running this code you only need to execute the code cell at 3.3.
+
+## 2.1. Envirotox data
+
+The Envirotox export file contains several sheets on test, substances, and taxonomy. We load the test and substance sheets separately and combine them later on.
+
+```{r}
+test <-
+  readxl::read_xlsx(here::here("input", "envirotox_20240123.xlsx"), sheet = "test", col_types ="text") %>% 
+                  janitor::clean_names() %>% 
+                  filter(!str_detect(cas, "Metal")) 
+                  
+  
+
+substances <- readxl::read_xlsx(here::here("input", "envirotox_20240123.xlsx"), sheet = "substance") %>% 
+                  janitor::clean_names() %>% 
+                  mutate(cas = as.character(cas)) %>% 
+                  filter(!str_detect(cas, "Metal")) %>% 
+                  separate(chemical_name, into = c("chemical_name", NA), sep = ";")
+```
+
+## 2.2. Pre-filtering of Envirotox test data
+
+Removes metals through cas and heavy_metals columns, removes entries with water solubility 5x above effect level, reduce to relevant taxonomic groups, timepoints, endpoints. Excludes data from sources that contain "embryo\|larval\|hatching\|egg" in the title **and (#MP) data with "(?i)embryo\|(?i)fetus" in the effect name**. Reduces multiple chemical names separated by semicolon to only the first name to allow for pattern matching.
+
+**#MP deleted: filter(str_detect(effect, "Mort") \| str_detect(effect, "Immobil")),** since this dismisses intoxication, mobility, loss of equilibrium. Relevant effect types are filtered later filtered specifically for fish and daph
+
+```{r}
+
+test_filtered <-
+  test %>% 
+  filter(!str_detect(cas, "Metal")) %>% 
+  filter(effect_is_5x_above_water_solubility == "0") %>% 
+  filter(str_detect(trophic_level, "FISH|INVERT")) %>% 
+  select(-ends_with(c(".y"))) %>% 
+  filter(test_type == "A") %>% 
+  filter(duration_hours %in% c("48", "96")) %>% 
+  mutate(duration_hours = as.numeric(duration_hours)) %>% 
+  filter(test_statistic == "LC50" | test_statistic == "EC50") %>% 
+  filter(str_detect(source, "embryo|larva|hatch|egg", negate = TRUE)) %>% 
+  filter(!str_detect(effect, "(?i)embryo|(?i)fetus"))%>%
+  select(-duration, -duration_days) %>% 
+  separate(chemical_name, into = c("chemical_name", NA), sep = ";") %>%
+  select(-effect_is_5x_above_water_solubility, -source, -version, -reported_chemical_name) %>% 
+  mutate(effect = str_replace_all(effect, "Mortality, Mortality", "Mortality")) %>% 
+  mutate(effect = str_replace_all(effect, "Mortality, Survival", "Mortality")) %>% 
+  mutate(effect = str_replace_all(effect, "Mortality/Growth", "Mortality")) %>% 
+  mutate(effect = str_replace_all(effect, "mortality and/ immobilisation", "Mortality")) %>% 
+  mutate(effect = str_replace_all(effect, "mortality  and/ immobilisation", "Mortality")) %>% 
+  mutate(effect = str_replace_all(effect, "Immobilization: Change in the failure to respond or lack of movement after mechanical stimulation.", "Immobilization")) %>% 
+  mutate(effect = str_replace_all(effect, "Intoxication", "Immobilization")) %>% 
+  mutate(effect = str_replace_all(effect, "Intoxication, Immobile", "Immobilization")) %>% 
+  mutate(effect = str_replace_all(effect, "Immobilization, Immobile", "Immobilization")) %>% 
+  mutate(effect = str_replace_all(effect, "Loss of equilibrium", "Immobilization")) %>% 
+  mutate(effect = str_replace_all(effect, "loss of equilibrium", "Immobilization")) %>% 
+  mutate(effect = str_replace_all(effect, "Mobility", "Immobilization")) %>% 
+  mutate(effect = str_replace_all(effect, "mobility", "Immobilization")) 
+
+```
+
+## 3.3 Load substances_full from file
+
+The pre-processing needs to be done once only. Afterwards this you can just run the following code cell to load the pre-processed substances list.
+
+```{r}
+substances_full <- read_csv(here::here("output", "Combined and cleaned substances and moa list.csv")) %>% 
+  mutate(cas = as.character(cas))
+```
+
+# 4. Effect Data filtering
+
+## 4.1. Filtering of fish and daphnia data for TG relevant species, endpoints and statistics
+
+fish96: filter(str_detect(effect, "(?i)mort\|(?i)intox\|(?i)immobil\|(?i)equilibrium"))%\>% \# added by MP, since otherwise we collect also some biomass plant data
+
+fish96: test_statistic == "EC50" \# added by MP
+
+daph48: "Daphnia" extended to other daphnids by MP; filter(str_detect(effect, "(?i)intox\|(?i)mobil")) \# added by MP
+
+```{r}
+fish96 <-
+  test_filtered %>% 
+  filter(str_detect(trophic_level, "FISH")) %>% 
+  filter((str_detect(latin_name, "(?i)danio rerio|(?i)pimephales promelas|(?i)Cyprinus carpio|(?i)Oryzias latipes|(?i)Poecilia reticulata|(?i)Lepomis macrochirus|(?i)Oncorhynchus mykiss|(?i)Gasterosteus aculeatus|(?i)Cyprinodon variegatus|(?i)Dicentrarchus labrax|(?i)Pagrus major"))) %>% 
+  filter(duration_hours == "96") %>% 
+    filter(str_detect(effect, "(?i)mort|(?i)intox|(?i)immobil|(?i)equilibrium"))%>%
+  filter(test_statistic == "LC50"|test_statistic == "EC50") %>%  
+  mutate(effect_value = as.numeric(effect_value))
+
+daph48 <- test_filtered %>% 
+  filter(trophic_level == "INVERT") %>%
+  filter(str_detect(latin_name, "(?i)daphnia")) %>% 
+  filter(duration_hours == "48") %>% 
+  filter(str_detect(effect, "(?i)intox|(?i)mobil"))%>% 
+  filter(test_statistic == "EC50")%>%
+   mutate(effect_value = as.numeric(effect_value))
+
+```
+
+# 5. Visualize content of resulting complete dataframe
+
+## 5.1. Visualize categories by classification scheme
+
+### 5.1.1 Overview count of categories per categorization scheme
+
+```{r}
+substances_full %>% 
+  pivot_longer(cols = 12:16, names_to ="categorization_scheme", values_to = "categories") %>% 
+  filter(!is.na(categories)) %>% 
+  mutate(categories = str_replace_all(categories, "_", " ")) %>% 
+  mutate(categorization_scheme = str_replace_all(categorization_scheme, "_moa_reduced", "")) %>% 
+  mutate(categorization_scheme = toupper(categorization_scheme)) %>% 
+  count(categorization_scheme, categories) %>% 
+  rename("Number of chemicals" = n,
+         "Categorization scheme" = categorization_scheme,
+         "Subcategory" = categories)
+
+substances_full %>% 
+  pivot_longer(cols = 12:16, names_to ="categorization_scheme", values_to = "categories") %>% 
+  filter(!is.na(categories)) %>% 
+  mutate(categories = str_replace_all(categories, "_", " ")) %>% 
+  mutate(categorization_scheme = str_replace_all(categorization_scheme, "_moa_reduced", "")) %>% 
+  mutate(categorization_scheme = toupper(categorization_scheme)) %>% 
+  count(categorization_scheme, categories) 
+```
+
+### 5.1.2 Barchart with facets of subcategories per categorization scheme
+
+```{r}
+
+ratios_by_cas_df_reduced_preprocess %>% 
+  # filter(cas %in% ratios_all_df$cas) %>% 
+  # pivot_longer(cols = 12:16, names_to ="categorization_scheme", values_to = "categories") %>% 
+  # filter(!is.na(categories)) %>% 
+  # mutate(categories = str_replace_all(categories, "_", " ")) %>% 
+  # mutate(categories = str_replace_all(categories, "a ch e", "AChE")) %>% 
+  # mutate(categories = str_replace_all(categories, "irac moa other", "IRAC MoA, other")) %>% 
+  # mutate(categorization_scheme = str_replace_all(categorization_scheme, "_moa_reduced", "")) %>% 
+  # mutate(categorization_scheme = toupper(categorization_scheme)) %>% 
+  # mutate(categories = str_to_title(categories)) %>% 
+  # mutate(categories = str_replace_all(categories, "Ache", "AChE")) %>% 
+  # mutate(categories = str_replace_all(categories, "Irac", "IRAC")) %>% 
+  # mutate(categories = str_replace_all(categories, "Moa", "MoA")) %>% 
+  count(categorization_scheme, subcategory) %>% 
+  ggplot(aes(y=fct_reorder(subcategory,n), x=n, fill = categorization_scheme))+
+  geom_col(col = "darkgrey")+
+  geom_text(aes(label = n), hjust = -0.1)+
+  facet_grid(categorization_scheme~., scales = "free_y", space = "free_y")+
+  scale_y_discrete(labels = function(x) stringr::str_wrap(x, width = 30))+
+  scale_x_continuous(limits = c(0,800))+
+  theme(legend.position = "none",
+        strip.text.y = element_text(angle=0),
+        strip.background = element_rect(color="black", fill="#FFFFFF", linewidth=1.5, linetype=0),
+        panel.background = element_rect(fill = "#F5F7F8",
+                                colour = "#F5F7F8",
+                                size = 0.5, linewidth = "solid"))+
+  scale_fill_viridis_d()+
+  labs(y="Subcategories", x = "Number of chemicals")
+
+ggsave(plot = last_plot(), here::here ("figures", "Chemicals per categorization scheme.png"), dpi = 300, width = 200, height = 200, units = "mm")
+
+ggsave(plot = last_plot(), here::here ("figures", "Figure1-Chemicals per categorization scheme.pdf"), dpi = 300, width = 200, height = 200, units = "mm")
+
+ggsave(plot = last_plot(), here::here ("figures", "Figure1-Chemicals per categorization scheme.jpg"), dpi = 300, width = 200, height = 200, units = "mm")
+
+```
+
+### 5.1.3 Subcategories as Sankey chart (Flow)
+
+```{r}
+# remotes::install_github("davidsjoberg/ggsankey")
+library(ggsankey)
+
+sankey_data <-
+  ratios_by_cas_df_reduced_preprocess %>% 
+  # pivot_longer(cols = 23:27, names_to ="categorization_scheme", values_to = "categories") %>% 
+  # filter(!is.na(categories)) %>% 
+  # mutate(categories = str_replace_all(categories, "_", " ")) %>% 
+  # mutate(categories = str_replace_all(categories, "a ch e", "AChE")) %>% 
+  # mutate(categories = str_replace_all(categories, "irac moa other", "IRAC MoA, other")) %>% 
+  # mutate(categorization_scheme = str_replace_all(categorization_scheme, "_moa_reduced", "")) %>% 
+  # mutate(categorization_scheme = toupper(categorization_scheme)) %>% 
+  mutate(subcategory = str_wrap(subcategory, width = 20)) %>% 
+  pivot_wider(names_from = categorization_scheme, values_from = subcategory, values_fill = "No categorization") %>% 
+  make_long(TEST, ASTER, KRAMER, IRAC, EFSA)
+
+sankey_data %>% 
+  # mutate(node = factor(node, levels=rev(node_order))) %>%
+  ggplot(aes(x = x,
+               next_x = next_x, 
+               node = node, 
+               next_node = next_node,
+               fill = factor(node),
+             label = node))+
+  geom_sankey(flow.alpha = 0.5, node.color = "#000000", color = "#000000")+
+  geom_sankey_label(fill = "#FFFFFF") +
+  theme_sankey(base_size = 14)+
+  scale_fill_viridis_d()+
+  theme(legend.position = "none")+
+  labs(x="")
+
+
+ggsave(plot = last_plot(), filename = "Sankey_categorizations_categories.png", path = here::here("figures"), height = 200, width = 300, units = "mm", device = "png") 
+
+
+```
+
+## 5.2. Frequency of effect groups
+
+Calculate frequency of species and frequency of effects within the selected FISH and INVERT data. Effect groups are first cleaned up and unified. Output is a table
+
+```{r}
+
+ fish_daph_effects_species <- rbind(fish96, daph48)
+
+ # calculate frequency of TG relevant unique effects within the selected data
+ fish_daph_percent_unique_effects <-
+   fish_daph_effects_species %>%
+     ungroup() %>% 
+   mutate(effect = str_replace_all(effect, "Mortality, Mortality", "Mortality")) %>% 
+   mutate(effect = str_replace_all(effect, "Mortality, Survival", "Mortality")) %>%
+   mutate(effect = str_replace_all(effect, "Mortality/Growth", "Mortality")) %>% 
+   mutate(effect = str_replace_all(effect, "mortality and/ immobilisation", "Mortality")) %>% 
+   mutate(effect = str_replace_all(effect, "mortality  and/ immobilisation", "Mortality")) %>% 
+   mutate(effect = str_replace_all(effect, "Immobilization: Change in the failure to respond or lack of movement after mechanical stimulation.", "Immobilization")) %>% 
+   mutate(effect = str_replace_all(effect, "Intoxication", "Immobilization")) %>% 
+   mutate(effect = str_replace_all(effect, "Intoxication, Immobile", "Immobilization")) %>% 
+   mutate(effect = str_replace_all(effect, "Immobilization, Immobile", "Immobilization")) %>% 
+   mutate(effect = str_replace_all(effect, "Loss of equilibrium", "Immobilization")) %>% 
+   mutate(effect = str_replace_all(effect, "loss of equilibrium", "Immobilization")) %>% 
+   mutate(effect = str_replace_all(effect, "Mobility", "Immobilization")) %>% 
+   mutate(effect = str_replace_all(effect, "mobility", "Immobilization")) %>% 
+     count(trophic_level, effect, duration_hours, test_statistic) %>% 
+     group_by(trophic_level) %>% 
+   mutate(trophic_level_count = sum(n)) %>% 
+     ungroup() %>% 
+   mutate(percentage = round((n/trophic_level_count)*100, 1)) %>% 
+   ungroup() %>%
+   arrange(trophic_level, desc(test_statistic), desc(percentage))
+
+ 
+write_xlsx(fish_daph_percent_unique_effects, here::here("tables", "fish_daph_unique_effects.xlsx"))
+
+
+# calculate frequency of TG relevant species within the selected data
+fish_daph_percent_unique_TGsepcies <- fish_daph_effects_species %>%
+  group_by(trophic_level, latin_name) %>%
+  summarise(Frequency = n()) %>%
+  mutate(Percentage = round((Frequency / sum(Frequency)) * 100, 1)) %>%
+  arrange(trophic_level, desc(Percentage))
+
+ 
+write_xlsx(fish_daph_percent_unique_TGsepcies, here::here("tables", "fish_daph_percent_unique_TGsepcies.xlsx"))
+
+```
+
+# 6 Summarize and visualize Fish 96 hours and Daphnids 48 hours data, grouped by cas
+
+```{r}
+
+fish96_summarized_by_cas <- fish96 %>% 
+  group_by(cas) %>% 
+  summarize(median_fish = median(effect_value, na.rm = TRUE),
+            mean_fish = mean(effect_value, na.rm = TRUE),
+            geomean_fish = geometric.mean(effect_value, na.rm = TRUE),
+            sd_fish = sd(effect_value, na.rm = TRUE),
+            cv_fish = (sd_fish/mean_fish)*100,
+            n_fish = n())
+
+daph48_summarized_by_cas <- daph48 %>% 
+    group_by(cas) %>% 
+  summarize(median_daphn = median(effect_value, na.rm = TRUE),
+            mean_daphn = mean(effect_value, na.rm = TRUE),
+            geomean_daphn = geometric.mean(effect_value, na.rm = TRUE),
+            sd_daphn = sd(effect_value, na.rm = TRUE),
+            cv_daphn = (sd_daphn/mean_daphn)*100,
+            n_daphn = n())
+```
+
+## 6.1 Point plot with linear regression
+
+and labeled compounds with ratio above 100 and lm equation (similar to Belanger)
+
+```{r}
+
+line_labels <- tibble(geomean_fish = c(100000,100000,100000),
+                      geomean_daphn = c(100000,1000000,10000000),
+                      label = c(">1", ">10", ">100"))
+
+pointplot_data <-
+  fish96_summarized_by_cas %>% 
+  left_join(daph48_summarized_by_cas, by = "cas", suffix = c("_fish", "_daph")) %>% 
+  left_join(unique(select(substances_full, cas, chemical_name)), by = "cas") %>% 
+  mutate(geomean_ratio = (geomean_daphn/geomean_fish)) %>%
+  filter(!is.na(geomean_ratio)) %>% 
+  mutate(label = ifelse(geomean_ratio >100, chemical_name, NA_character_),
+         color_category = case_when(
+           geomean_ratio < 10 ~ "Below 10",
+           geomean_ratio >= 10 & geomean_ratio <= 100 ~ "10 to 100",
+           geomean_ratio > 100 ~ "Above 100"))
+
+
+
+library(ggpmisc)
+
+pointplot_data %>% 
+  ggplot(aes(x=geomean_fish, y=geomean_daphn))+
+  geom_point(aes(col = color_category), alpha = 0.8)+
+  geom_abline(slope = 1, intercept = 0)+
+  geom_abline(slope = 1, intercept = 1, linetype = 2)+
+  geom_abline(slope = 1, intercept = 2, linetype = 3)+
+  geom_label_repel(aes(label = label), max_overlaps = 20, nudge_x = 1, nudge_y =5)+
+  scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)))+
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)))+
+  scale_color_manual(values = c("orange","red","#80ed99"))+
+  guides(color = "none")+
+  labs(x = "geomean Fish LC50, mg/L",
+       y = "geomean Daphnids EC50, mg/L")+
+  geom_label(data = line_labels, aes(x=geomean_fish, y=geomean_daphn, label = label), linetype = c(1,2,3))+
+  stat_poly_line(se = FALSE)+
+  stat_poly_eq(mapping = use_label(labels = c("eq", "R2")))
+  
+
+
+ggsave(plot = last_plot(), here::here("figures", "GEOMEAN-Fish96 vs. Daphn48 by cas.png"), width = 140, height = 140, unit = "mm", dpi = 600)
+  
+
+```
+
+# 5. Combine fish and daphnia data
+
+## 5.1. Per chemical median EC50 daphnids/EC50 fish ratios
+
+### 5.1.1. Calculate per chemical median EC50 daphnids/EC50 fish ratios
+
+```{r}
+ratios_by_cas_df <- fish96_summarized_by_cas %>%
+  left_join(daph48_summarized_by_cas, by = "cas", suffix = c("_fish", "_daph")) %>%
+  mutate(geomean_ratio = (geomean_daphn/geomean_fish)) %>%
+  filter(!is.na(geomean_ratio)) %>%
+  ungroup() %>%
+  left_join(substances_full, by = "cas")
+
+
+write_xlsx(ratios_by_cas_df, here::here("output", "All fish and daphnid ratios_by_cas_df.xlsx"))
+```
+
+### 5.1.2. Visualize distribution of per chemical median EC50 daphnids/EC50 fish ratios
+
+```{r}
+
+ratios_by_cas_overview_plot <-
+  ratios_by_cas_df %>% 
+  ggplot(aes(x=geomean_ratio))+
+  geom_rect(aes(xmin=0.0000001, xmax=1, ymin=0, ymax=200), fill = "#80ed99", alpha = .5)+
+  geom_rect(aes(xmin=1, xmax=10, ymin=0, ymax=200), fill = "#80ed99", alpha = .5)+
+  geom_rect(aes(xmin=10, xmax=100, ymin=0, ymax=200), fill = "orange", alpha = .5)+
+  geom_rect(aes(xmin=100, xmax=10000, ymin=0, ymax=200), fill = "red", alpha = .5)+
+  geom_histogram(col = "#000000", fill = "darkgrey")+
+  geom_vline(xintercept = 1, linetype = 1, linewidth = 1)+
+  geom_vline(xintercept = 10, linetype = 2, linewidth = 1)+
+  geom_vline(xintercept = 100, linetype = 3, linewidth = 1)+
+  scale_x_continuous(trans="log10", breaks = c(1,10,100), labels = c(1,10,100))+
+  labs(x="Geomean ratio",
+       y="Number of chemicals")
+
+print(ratios_by_cas_overview_plot)
+
+ggsave(plot = ratios_by_cas_overview_plot, here::here("figures", "GEOMEAN-ratios_by_cas_overview_plot.png"))
+```
+
+### 5.1.3. Visualize distribution of per chemical median EC50 values per taxonomic group
+
+```{r}
+
+effect_values_by_cas_overview <- ratios_by_cas_df %>% 
+  pivot_longer(cols = c("geomean_fish", "geomean_daphn"), names_to ="tax_group", values_to = "effect_value") %>% 
+  mutate(tax_group =str_replace_all(tax_group, "geomean_fish", "Fish"),
+         tax_group =str_replace_all(tax_group, "geomean_daphn", "Daphnids")) %>% 
+  ggplot(aes(y=tax_group, x = effect_value, fill = tax_group)) +
+  geom_density_ridges2(col = "black", quantile_lines = TRUE, quantiles = 4)+
+  scale_x_log10()+
+  scale_fill_manual(values=c("Fish" = "#218380",
+                             "Daphnids" = "#ffbc42"))+
+  theme(legend.position = "none")+
+  labs(y="Taxonomic group", x = "EC50 or LC50 [mg/L], geomean by cas")
+
+print(effect_values_by_cas_overview) 
+
+
+ggsave(plot = effect_values_by_cas_overview, here::here("figures", "GEOMEAN-effect_values_by_cas_overview.png"))
+
+```
+
+```{r}
+ridgeline_fish96 <- fish96 %>% 
+  filter(cas %in% ratios_by_cas_df$cas) %>% 
+  add_count(latin_name) %>% 
+  filter(n >2) %>% 
+  mutate(name_label = paste0(latin_name, " (", n,")")) %>% 
+  ggplot(aes(y=fct_reorder(name_label, n), x=effect_value))+
+    geom_density_ridges2(fill = "#218380", col = "black", quantile_lines = TRUE, quantiles = 4)+
+    scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)))+
+  labs(y= "Fish species\n(Number of data points)", x = "LC50, mg/L")+
+  theme(axis.text.y = element_text(face = "italic"))
+
+ridgeline_fish96
+
+ggsave(plot = ridgeline_fish96, here::here("figures", "Ridgeline_effect_values_by_cas_overview-FISH.png"))
+```
+
+```{r}
+ridgeline_daph48 <- daph48 %>% 
+  filter(cas %in% ratios_by_cas_df$cas) %>%
+  add_count(latin_name) %>% 
+  filter(n > 2) %>% 
+  mutate(latin_name = str_replace_all(latin_name, "Daphnia", "D.")) %>% 
+  mutate(name_label = paste0(latin_name, " (", n,")")) %>% 
+  ggplot(aes(y=fct_reorder(name_label, n), x=effect_value))+
+    geom_density_ridges2(fill = "#ffbc42", col = "black", quantile_lines = TRUE, quantiles = 4)+
+    scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)))+
+  labs(y= "Daphnid species\n(Number of data points)", x = "EC50, mg/L")+
+  theme(axis.text.y = element_text(face = "italic"))
+
+ridgeline_daph48
+
+ggsave(plot = ridgeline_daph48, here::here("figures", "Ridgeline_effect_values_by_cas_overview-DAPH.png"))
+```
+
+```{r}
+ridgeline_amph <- amphib96_allspecies %>% 
+  add_count(latin_name) %>% 
+  filter(n > 2) %>% 
+  mutate(effect_value = as.numeric(effect_value)) %>% 
+  filter(!is.na(effect_value)) %>% 
+  mutate(name_label = paste0(latin_name, " (", n,")")) %>% 
+  ggplot(aes(y=fct_reorder(name_label, n), x=effect_value))+
+    geom_density_ridges2(fill = "#72a16b", col = "black", quantile_lines = TRUE, quantiles = 4)+
+    scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)))+
+  labs(y= "Amphibian species\n(Number of data points)", x = "LC50, mg/L")+
+  theme(axis.text.y = element_text(face = "italic"))
+
+ridgeline_amph
+
+ggsave(plot = ridgeline_amph, here::here("figures", "Ridgeline_effect_values_by_cas_overview-DAPH.png"))
+```
+
+```{r}
+effect_values_by_cas_overview /
+(ridgeline_fish96 + ridgeline_daph48) /
+(ridgeline_amph +ratios_by_cas_overview_plot) + plot_annotation(tag_levels = "A")
+
+ggsave(plot = last_plot(), here::here("figures", "GEOMEAN-Patchwork-dataset_overview_figure.png"), dpi = 600, units = "mm", width = 250, height = 280, device = "png")
+```
+
+# 6. Calculate the size of the different categories across categorization schemes
+
+## 6.1. TEST
+
+```{r}
+ratios_by_cas_df %>% 
+select(cas, chemical_name, test) %>% 
+  filter(!is.na(test)) %>%
+  unique() %>% 
+  mutate(test = fct_other(test, keep=c("AChE inhibition", 
+                  "Neurotoxicity"), other_level = "Non-neurotoxic")) %>% 
+  count(test) 
+```
+
+## 6.2. ASTER
+
+(# MP added Caffeine, Nicotine was missing in the script of CS)
+
+```{r}
+ratios_by_cas_df %>%
+  colnames()
+  
+ratios_by_cas_df %>% 
+select(cas, chemical_name, aster) %>% 
+  filter(!is.na(aster)) %>% 
+  unique() %>% 
+  mutate(aster = fct_other(aster, keep=c("OP mediated AChE inhibition",
+                       "Neurotoxicant: Cyclodiene-type",
+                       "Neurotoxicant: Pyrethroid",
+                       "Neurotoxicant: Caffeine",
+                       "Carbamate mediated AChE inhibition",
+                       "Neurotoxicant: Nicotine"), other_level = "Non-neurotoxic")) %>%
+  count(aster) 
+```
+
+## 6.3. IRAC
+
+(# MP: the following IRAC categories were missing via the script of CS,, which contain 1 chemical each: 1) gaba gated chloride channel blockers phenylpyrazoles fiproles, 2) octopamine receptor agonists, 3) voltage dependent sodium channel blockers oxadidiazines semicarbazones)
+
+```{r}
+ratios_by_cas_df %>%
+  colnames()
+  
+ratios_by_cas_df %>% 
+select(cas, chemical_name, irac_moa) %>% 
+  filter(!is.na(irac_moa)) %>% 
+  unique() %>% 
+  count(irac_moa) 
+```
+
+#reviewing the remaining irac_moa categories, simplify the longest names of the categories to something more readable
+
+```{r}
+ratios_by_cas_df <- ratios_by_cas_df %>%
+  mutate(
+    irac_moa = str_replace_all(
+      irac_moa, 
+      "nicotinic_acetylcholine_receptor_n_a_ch_r_competitive_modulators_neonicotinoids_other", 
+      "nAChR_interaction"
+    ),
+    irac_moa = str_replace_all(
+      irac_moa, 
+      "gaba_gated_chloride_channel_blockers_cyclodiene_organochlorines", 
+      "gaba_gated_ClC_blockers_cyclodiene_organochlorines"
+    ),
+    irac_moa = str_replace_all(
+      irac_moa,
+      "gaba_gated_chloride_channel_blockers_phenylpyrazoles_fiproles",
+      "gaba_gated_ClC_blockers_phenylpyrazoles_fiproles"
+  ),
+  irac_moa = str_replace_all(
+      irac_moa,
+      "voltage_dependent_sodium_channel_blockers_oxadiazines_semicarbazones",
+      "VGSC_blockers_oxadiazines_semicarbazones"
+  ))
+
+ratios_by_cas_df %>% 
+select(cas, chemical_name, irac_moa) %>% 
+  filter(!is.na(irac_moa)) %>% 
+  unique() %>% 
+  count(irac_moa)
+```
+
+## 6.4. EFSA
+
+```{r}
+ratios_by_cas_df %>%
+  colnames()
+  
+ratios_by_cas_df %>% 
+select(cas, chemical_name, efsa_selection_criteria) %>% 
+  filter(!is.na(efsa_selection_criteria)) %>% 
+  unique() %>% 
+  count(efsa_selection_criteria) 
+```
+
+## 6.6. Reduce complexity in the categorizations:
+
+\# Let´s select positive data from that EFSA file. EFSA data contain negative controls; and "in vivo data available" includes negative chemicals like captopril (see Aschner et al paper) and flufenacet (we assessed it in the EFSA AOP/IATA case study). Model compounds can be accepted as positives (Aschner paper). NTP relates to organophosphorous flame retardants for which there is some in vivo concern for DNT from the US EPA case study. No source is given for the selection of chemicals via the criteria "metabolite/related", but we may assume that it relates to an neurotoxicologically active compound. In summary I suggest to use this string to select positives from the EFSA file: "(?i)positive\|(?i)model\|NTP\|(?i)metabolite" \# In oder not to loose chemicals with irac_moa for the plot, I suggest to pool those irac_moa groups that contain only one chemical - see "irac_moa_reduced" (remember two irac_moa class names were simplified)
+
+```{r}
+ratios_by_cas_df_reduced <-
+  ratios_by_cas_df %>% 
+  mutate(
+    irac_moa = str_replace_all(
+      irac_moa, 
+      "nicotinic_acetylcholine_receptor_n_a_ch_r_competitive_modulators_neonicotinoids_other", 
+      "nAChR_interaction"
+    ),
+    irac_moa = str_replace_all(
+      irac_moa, 
+      "gaba_gated_chloride_channel_blockers_cyclodiene_organochlorines", 
+      "gaba_gated_ClC_blockers_cyclodiene_organochlorines"
+    ),
+    irac_moa = str_replace_all(
+      irac_moa,
+      "gaba_gated_chloride_channel_blockers_phenylpyrazoles_fiproles",
+      "gaba_gated_ClC_blockers_phenylpyrazoles_fiproles"
+    ),
+    irac_moa = str_replace_all(
+      irac_moa,
+      "voltage_dependent_sodium_channel_blockers_oxadiazines_semicarbazones",
+      "VGSC_blockers_oxadiazines_semicarbazones"
+    )) %>% 
+  mutate(test_moa_reduced = fct_other(test, keep=c
+                                      ("AChE inhibition", 
+                                        "Neurotoxicity"), 
+                                      other_level = "Non-neurotoxic")) %>% 
+  mutate(aster_moa_reduced = fct_other(aster, keep=c
+                                       ("OP mediated AChE inhibition",
+                                         "Neurotoxicant: Cyclodiene-type",
+                                         "Neurotoxicant: Pyrethroid",
+                                         "Carbamate mediated AChE inhibition",
+                                         "Neurotoxicant: Nicotine",
+                                         "Neurotoxicant: Caffeine"),
+                                       other_level = "Non-neurotoxic")) %>%
+  mutate(kramer_moa_reduced = fct_other(kramer_moa, keep=c
+                                        ("Neuroactive"), 
+                                        other_level = "Non-neurotoxic")) %>% 
+  mutate(efsa_moa_reduced = if_else(str_detect(efsa_selection_criteria, 
+                                               regex("(?i)positive|(?i)model|NTP|(?i)metabolite")), 
+                                    "neurotoxic", 
+                                    "No categorization"))%>%
+  mutate(irac_moa_reduced = fct_other(irac_moa, keep=c
+                                      ("a_ch_e_inhibitors",
+                                        "gaba_gated_ClC_blockers_cyclodiene_organochlorines", 
+                                        "nAChR_interaction",
+                                        "organophosphates",
+                                        "sodium_channel_modulators"),
+                                      other_level = "irac_moa_other")) %>%
+  mutate(across(.cols = 21:25, .fns = as.character)) 
+
+ratios_by_cas_df_reduced %>% 
+  count(irac_moa_reduced) 
+
+spalten_namen <- colnames(ratios_by_cas_df_reduced)[21:25]
+print(spalten_namen)
+
+write_xlsx(ratios_by_cas_df_reduced, here::here("tables", "GEOMEAN-ratios_by_cas_df_reduced.xlsx"))
+```
+
+```{r}
+
+ratios_by_cas_df %>% 
+  filter(str_detect(chemical_name, "Chlortetracycline"))
+Cyclodiene
+```
+
+### 6.7. Ratios \<1, \>1, \> 10, \>100, per categorization scheme & category
+
+!!! This is the correct way to calculate the ratio brackets !!!
+
+```{r}
+
+ratios_by_cas_df_reduced_overview_summary <-
+  ratios_by_cas_df_reduced %>%
+  select(-c(16:24)) %>% 
+  pivot_longer(cols = c(test_moa_reduced, aster_moa_reduced, irac_moa_reduced, efsa_moa_reduced, kramer_moa_reduced), names_to ="categorization_scheme", values_to = "categories") %>% 
+  mutate(categories = replace_na(categories, "No Categorization")) %>% 
+  mutate(categories = str_replace_all(categories, "No categorization", "No Categorization")) %>% 
+  mutate(categories = str_replace_all(categories, "_", " ")) %>% 
+  mutate(ratio_bracket = case_when(
+    geomean_ratio <= 1 ~ "<=1",
+    geomean_ratio > 1 & geomean_ratio <= 10 ~ ">1",
+    geomean_ratio > 10 & geomean_ratio <= 100 ~ ">10",
+    geomean_ratio > 100 ~ ">100")) %>% 
+  count(categorization_scheme, categories, ratio_bracket) %>% 
+  group_by(categorization_scheme, categories) %>% 
+  mutate(total_n = sum(n)) %>% 
+  ungroup()
+
+
+write_xlsx(ratios_by_cas_df_reduced_overview_summary, here::here("tables", "GEOMEAN-ratios_by_cas_df_reduced_overview_summary.xlsx"))
+```
+
+```{r}
+ratios_by_cas_df_reduced %>%
+  select(-c(16:24)) %>% 
+  mutate(ratio_bracket = case_when(
+    geomean_ratio <= 1 ~ "<=1",
+    geomean_ratio > 1 & geomean_ratio <= 10 ~ ">1",
+    geomean_ratio > 10 & geomean_ratio <= 100 ~ ">10",
+    geomean_ratio > 100 ~ ">100")) %>% 
+  count(ratio_bracket) %>% 
+  mutate(total_n = sum(n),
+         bracket_percent = round((n/total_n)*100,1))
+  
+# across all chemicals in our dataset, 4 % are more than 10x toxic to fish than to daphnids
+```
+
+## Table/Heatmap of the ratio brackets per CAS for Manuscript
+
+```{r}
+reorder_percent_brackets <- c("<=1", ">1", ">10", ">100")
+
+ratios_by_cas_df_reduced_overview_summary %>% 
+  View()
+  
+
+heatmap_table_ratios_brackets <-
+  ratios_by_cas_df_reduced_overview_summary %>% 
+  mutate(categories = str_to_title(categories)) %>%
+  mutate(categorization_scheme = str_replace_all(categorization_scheme, "moa_reduced", "")) %>% 
+  mutate(categorization_scheme = str_replace_all(categorization_scheme, "_", " ")) %>% 
+  mutate(categorization_scheme = str_to_upper(categorization_scheme)) %>%
+  mutate(categories = str_replace_all(categories, "A Ch E", "AChE")) %>%
+  mutate(categories = str_replace_all(categories, "Ache", "AChE")) %>%
+  mutate(categories = str_replace_all(categories, "Irac", "IRAC")) %>%
+  mutate(categories = str_replace_all(categories, "Nachr Interaction","(nAChr) Interaction")) %>% 
+  mutate(percent = round(n/total_n*100, digits = 1)) %>% 
+  mutate(ratio_bracket = factor(ratio_bracket, levels=reorder_percent_brackets)) %>% 
+  #this uses the same reorder-categories as the violin-plot
+  # mutate(categories = factor(categories, levels=violin_reorder_subcategories)) %>%
+  mutate(y_label = paste0(categories, " (", total_n, ")")) %>% 
+  ggplot(aes(y=y_label, x = ratio_bracket, fill = percent))+
+           geom_tile(color = "darkgrey")+
+  geom_text(aes(label = percent))+
+  facet_grid(rows = vars(categorization_scheme), scales = "free_y", space = "free_y")+
+  labs(y="", x = "Percent of ratios in groups")+
+  guides(fill = "none")+
+  scale_fill_gradient(low = "white", high = "#83c5be")+
+  theme(strip.background = element_rect(color="black", fill="#FFFFFF", linewidth=1.5, linetype=0),
+        panel.background = element_rect(fill = "#F5F7F8",
+                                colour = "#F5F7F8",
+                                size = 0.5, linetype = "solid"))
+    # ggh4x::facetted_pos_scales(y = list(
+    #   str_detect(categorization_scheme, "ASTER") ~ scale_y_discrete(breaks = c("Non-Neurotoxic",
+    #                                                                  "No Categorization",
+    #                                                                  "Carbamate Mediated AChE Inhibition",
+    #                                                                  "Neurotoxicant: Cyclodiene-Type",
+    #                                                                  "Neurotoxicant: Nicotine",
+    #                                                                  "Neurotoxicant: Pyrethroid",
+    #                                                                  "Op Mediated AChE Inhibition"),
+    #                                                       labels = c("Non-Neurotoxic",
+    #                                                                  "No Categorization",
+    #                                                                  "Carbamate Mediated AChE Inhibition",
+    #                                                                  "Neurotoxicant: Cyclodiene-Type",
+    #                                                                  "Neurotoxicant: Nicotine",
+    #                                                                  "Neurotoxicant: Pyrethroid",
+    #                                                                  "Op Mediated AChE Inhibition")),
+    #   str_detect(categorization_scheme, "EFSA") ~ scale_y_discrete(breaks = c("No Categorization",
+    #                                                                 "Neurotoxic"),
+    #                                                      labels = c("No Categorization",
+    #                                                                 "Neurotoxic")),
+    #   str_detect(categorization_scheme, "IRAC") ~ scale_y_discrete(breaks = c("No Categorization",
+    #                                                                 "(nAChr) Interaction",
+    #                                                                 "AChE Inhibitors",
+    #                                                                 "Gaba Gated Clc Blockers Cyclodiene Organochlorines",
+    #                                                                 "Organophosphates",
+    #                                                                 "Sodium Channel Modulators",
+    #                                                                 "IRAC Moa Other"),
+    #                                                      labels = c("No Categorization",
+    #                                                                 "(nAChr) Interaction",
+    #                                                                 "AChE Inhibitors",
+    #                                                                 "Gaba Gated Clc Blockers Cyclodiene Organochlorines",
+    #                                                                 "Organophosphates",
+    #                                                                 "Sodium Channel Modulators",
+    #                                                                 "IRAC Moa Other")),
+    #   str_detect(categorization_scheme, "KRAMER") ~ scale_y_discrete(breaks = c("No Categorization",
+    #                                                                   "Non-Neurotoxic",
+    #                                                                   "Neuroactive"),
+    #                                                        labels = c("No Categorization",
+    #                                                                   "Non-Neurotoxic",
+    #                                                                   "Neuroactive")),
+    #  str_detect(categorization_scheme, "TEST") ~ scale_y_discrete(breaks = c("No Categorization",
+    #                                                                 "Non-Neurotoxic",
+    #                                                                 "AChE Inhibition",
+    #                                                                 "Neurotoxicity"),
+    #                                                      labels = c("No Categorization",
+    #                                                                 "Non-Neurotoxic",
+    #                                                                 "AChE Inhibition",
+    #                                                                 "Neurotoxicity"))))
+
+print(heatmap_table_ratios_brackets)
+
+ggsave(plot = last_plot(), filename = "GEOMEAN-Heatmap table ratio distribution across categories.png", path = here::here("figures"), height = 180, width = 180, units = "mm", device = "png")
+
+ggsave(plot = last_plot(), filename = "GEOMEAN-Heatmap table ratio distribution across categories.pdf", path = here::here("figures"), height = 180, width = 180, units = "mm", device = "pdf")
+```
+
+### 6.1.8. Violing plot: Visualization of per chemical median ratios
+
+### Pre-processing and cleanup of data
+
+```{r}
+
+ratios_by_cas_df_reduced_preprocess <-
+  ratios_by_cas_df_reduced %>% 
+  mutate(test_moa_reduced = as.character(test_moa_reduced)) %>% 
+  mutate(irac_moa_reduced = as.character(irac_moa_reduced)) %>% 
+  mutate(aster_moa_reduced = as.character(aster_moa_reduced)) %>% 
+  mutate(kramer_moa_reduced = as.character(kramer_moa_reduced)) %>% 
+  mutate(test_moa_reduced = replace_na(test_moa_reduced, "No Categorization")) %>% 
+  mutate(aster_moa_reduced = replace_na(aster_moa_reduced, "No Categorization")) %>% 
+  mutate(irac_moa_reduced = replace_na(irac_moa_reduced, "No Categorization")) %>% 
+  mutate(irac_moa_reduced = str_replace_all(irac_moa_reduced, "_", " ")) %>% 
+  mutate(efsa_moa_reduced = replace_na(efsa_moa_reduced, "No Categorization")) %>% 
+  mutate(kramer_moa_reduced = replace_na(kramer_moa_reduced, "No Categorization")) %>% 
+  select(-kramer_moa, -irac_moa, -aster, -test, -efsa_selection_criteria) %>% 
+  pivot_longer(cols = c(test_moa_reduced, aster_moa_reduced, irac_moa_reduced, efsa_moa_reduced, kramer_moa_reduced), names_to = "categorization_scheme", values_to = "subcategory") %>% 
+  mutate(subcategory = str_replace_all(subcategory, "a ch e", "AChE")) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "n a ch r", "(nAChr)")) %>% 
+  mutate(categorization_scheme = str_replace_all(categorization_scheme, "_moa_reduced", "")) %>% 
+  mutate(categorization_scheme = toupper(categorization_scheme)) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "Ache", "AChE")) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "Nachr", "(nAChr)")) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "Irac", "IRAC")) 
+  
+```
+
+## Full violin plot for manuscript
+
+```{r}
+
+ratios_by_cas_df_reduced_preprocess %>% 
+  count(categorization_scheme, subcategory)
+
+violin_reorder_subcategories <- c(
+"Non-Neurotoxic",
+"No Categorization",
+"Op Mediated AChE Inhibition",
+"Organophosphates",
+"Neurotoxicant: Pyrethroid",
+"Sodium Channel Modulators",
+"Neuroactive",
+"Neurotoxicity",
+"AChE ",
+"Neurotoxic",
+"(nAChr) Interaction",
+"AChE Inhibitors",
+"AChE Inhibition",
+"IRAC Moa Other",
+"Carbamate Mediated AChE Inhibition",
+"Neurotoxicant: Nicotine",
+"Neurotoxicant: Cyclodiene-Type"
+)
+
+
+ratios_by_cas_df_reduced_preprocess_violin <- ratios_by_cas_df_reduced_preprocess %>% 
+  mutate(color_assignment = case_when(
+    str_detect(subcategory, "Non-Neurotoxic") ~ "grey",
+    str_detect(subcategory, "No Categorization") ~ "grey",
+    str_detect(subcategory, "Neurotoxicant: Cyclodiene-Type") ~ "cyclodiene",
+    geomean_ratio <= 1 ~ "<=1",
+    geomean_ratio > 1 & geomean_ratio <= 10 ~ ">1",
+    geomean_ratio > 10 & geomean_ratio <= 100 ~ ">10",
+    geomean_ratio > 100 ~ ">100",
+    TRUE ~ "FALSE CHECK")) 
+
+
+  
+cyclodiene_selection <-
+  ratios_by_cas_df_reduced_preprocess_violin %>% 
+  pivot_wider(names_from = categorization_scheme, values_from = subcategory, values_fill = "MISSING") %>% 
+  filter(str_detect(ASTER, ": Cyclodiene-Type")) %>% 
+    select(cas) %>% 
+    unique()
+
+cyclodiene_subset_fullviolin <- ratios_by_cas_df_reduced_preprocess_violin %>% 
+  filter(cas %in% cyclodiene_selection$cas) 
+  # mutate(subcategory = factor(subcategory, levels=rev(violin_reorder_subcategories)))
+
+
+  
+violin_colors <- c("<=1" = "#80ed99",
+                   ">1" = "#80ed99",
+                   ">10" = "orange",
+                     ">100" = "red",
+                   "grey" = "darkgrey",
+                   "cyclodiene" = "#22577a")
+  
+main_violin_plot <- ratios_by_cas_df_reduced_preprocess_violin %>%
+  # mutate(subcategory = replace_na(subcategory, "No Categorization")) %>% 
+  # mutate(subcategory = factor(subcategory, levels=rev(violin_reorder_subcategories))) %>% 
+  filter(!cas %in% cyclodiene_subset_fullviolin$cas) %>% 
+  ggplot(aes(y = subcategory, x= geomean_ratio))+
+  geom_jitter(aes(color = color_assignment), alpha = 0.8, width = 0.2)+
+  geom_boxplot(outlier.alpha = 0, alpha = 0.5)+
+  geom_violin(alpha = 0.3, scale = "width")+
+  geom_vline(xintercept = 1, linewidth = 0.5, linetype = 1)+
+  geom_vline(xintercept = 10, linewidth = 0.5, linetype = 2)+
+  geom_vline(xintercept = 100, linewidth = 0.5, linetype = 3)+
+  geom_boxplot(data=filter(cyclodiene_subset_fullviolin, str_detect(categorization_scheme, "ASTER")), outlier.alpha = 0, alpha = 0.5)+
+  geom_violin(data=filter(cyclodiene_subset_fullviolin, str_detect(categorization_scheme, "ASTER")), alpha = 0.3, scale = "width")+
+  geom_jitter(data=cyclodiene_subset_fullviolin, color = "#22577a", shape = 24, width = 0.1)+
+  scale_color_manual(values = violin_colors)+
+  scale_x_continuous(trans="log10", breaks = c(1,10,100))+
+  labs(y = "", x = "R_df\n(geomean EC50 daphnids)/\n(geomean LC50 fish)")+
+  scale_y_discrete(labels = function(x) stringr::str_wrap(x, width = 40, whitespace_only = FALSE))+
+  facet_grid(rows = vars(categorization_scheme), scales = "free_y", space = "free_y")+
+  theme(strip.background = element_rect(color="black", fill="#FFFFFF", linewidth=1.5, linetype=0),
+        panel.background = element_rect(fill = "#F5F7F8",
+                                colour = "#F5F7F8",
+                                size = 0.5, linetype = "solid"),
+        legend.position = "none")
+
+print(main_violin_plot)
+        
+        
+ggsave(plot = last_plot(), filename = "GEOMEAN-Violin_plot_by_cas.png", path = here::here("figures"), height = 300, width = 250, units = "mm", device = "png")
+```
+
+```{r}
+heatmap_table_ratios_brackets + main_violin_plot + plot_annotation(tag_levels = "A") +  plot_layout(widths = c(1.5, 3))
+
+ggsave(plot = last_plot(), filename = "Patchwork_heatmap-violin.png", path = here::here("figures"), height = 250, width = 350, units = "mm", device = "png")
+
+ggsave(plot = last_plot(), filename = "Patchwork_heatmap-violin.pdf", path = here::here("figures"), height = 250, width = 350, units = "mm", device = "pdf")
+```
+
+```{r}
+ratios_by_cas_df_reduced_preprocess_violin %>% 
+  pivot_wider(names_from = categorization_scheme, values_from = subcategory, values_fill = "MISSING") %>% 
+  filter(str_detect(ASTER, "Pyre")) %>% 
+  # filter(str_detect(chemical_name, "Lind")) %>% 
+  # filter(geomean_ratio >= 10) %>% 
+  select(chemical_name, ASTER) %>% 
+  unique() %>% 
+  count()
+```
+
+### Table with chemicals with ratios \>= 10, saved to Excel
+
+Please note that this includes all unique chemicals, not only those related to neurotoxicity. After export, it is judged manually if at least one of the classification schemes assigned a neurotoxicity label. If this is the case the chemical is included in the table in the manuscript.
+
+```{r}
+# List of chemicals with ratio >=10
+
+ratios_by_cas_df_reduced_preprocess %>%
+  filter(geomean_ratio >= 10) %>% 
+  select(chemical_name, cas, geomean_ratio, cv_fish, n_fish, cv_daphn, n_daphn, categorization_scheme, subcategory) %>% 
+  pivot_wider(names_from = categorization_scheme, values_from = subcategory, values_fill = "No categorization") %>% 
+  unique() %>% 
+  write_xlsx(path = here::here("output", "GEOMEAN-chemicals_with_ratio_over10.xlsx"))
+
+
+```
+
+```{r}
+ratios_by_cas_df_reduced_preprocess %>% 
+  select(cas, chemical_name, geomean_ratio, categorization_scheme, subcategory) %>% 
+  filter(str_detect(categorization_scheme, "ASTER")) %>% 
+  filter(str_detect(subcategory, "Cyclodiene|cyclodiene"))
+```
+
+### Is an increase in CV correlated to an increase in data points?
+
+```{r}
+library(ggpmisc)
+
+cv_n_fish <- ratios_by_cas_df_reduced_preprocess %>% 
+  select(cv_fish, n_fish) %>% 
+  mutate(tax_group = "fish") %>% 
+  rename(cv = cv_fish,
+         n = n_fish)
+
+cv_n_daphn <- ratios_by_cas_df_reduced_preprocess %>% 
+  select(cv_daphn, n_daphn) %>% 
+  mutate(tax_group = "daphnids") %>% 
+  rename(cv = cv_daphn,
+         n = n_daphn)
+
+cv_n_fish %>% 
+  rbind(cv_n_daphn) %>% 
+  filter(cv < 10000) %>% 
+  ggplot(aes(x=n, y=cv, col = tax_group))+
+  geom_jitter(alpha = 0.1)+
+  stat_poly_line(se = FALSE)+
+  stat_poly_eq(mapping = use_label(labels = c("eq", "R2")))+
+  theme(legend.position = c(0.8, 0.8),
+        legend.background = element_rect(fill="white", color = "#000000", size=0.5, linetype="solid"))+
+  scale_color_brewer(palette = "Set2", direction = -1)+
+  scale_x_log10(limits = c(1,NA))+
+  labs(col = "Taxonomic group", y = "Coefficient of Variation, CV [%]", x = "Number of data points")
+
+
+ggsave(plot = last_plot(), filename = str_replace_all("Correlation pointplot N and CV fish daphnids.png"," ","_"), path = here::here("figures"), height = 100, width = 150, units = "mm", device = "png")
+```
+
+### 6.2.6. Reduce complexity in the categorizations:
+
+\# Let´s select positive data from that EFSA file. EFSA data contain negative controls; and "in vivo data available" includes negative chemicals like captopril (see Aschner et al paper) and flufenacet (we assessed it in the EFSA AOP/IATA case study). Model compounds can be accepted as positives (Aschner paper). NTP relates to organophosphorous flame retardants for which there is some in vivo concern for DNT from the US EPA case study. No source is given for the selection of chemicals via the criteria "metabolite/related", but we may assume that it relates to an neurotoxicologically active compound. In summary I suggest to use this string to select positives from the EFSA file: "(?i)positive\|(?i)model\|NTP\|(?i)metabolite" \# In oder not to loose chemicals with irac_moa for the plot, I suggest to pool those irac_moa groups that contain only one chemical - see "irac_moa_reduced" (remember two irac_moa class names were simplified)
+
+# Compounds underpredicted in OECD 249/Tanneberger et al. (2013)
+
+Analyse EC50 daphnids/ EC50 fish ratio for chemicals which were less sensitive in the fish cell test compared to the juvenile/adult fish test.
+
+The following chemicals were less sensitive: caffeine (cas 58082), permetrhin (cas 52645531), (lindane, cas 58899), allyl alcohol (cas 107186), 4-fluroanilin (cas 371404).
+
+Using the filter criteria as selected above, daph/fish ratios are only available for Permethrin and Lindane. Including in addition 24h daphnids test daph/fish ratios are availalbe also for Caffeine; including in addition for daphnids also the effect type "mortality and LC50", daph/fish ratios are availalbe also for Allyl alcohol. For 4-fluroanilin no invertebrate data are available in the Envirotox-DB.
+
+The cas-median ratios for the 4 chemicals with sufficient data are below 1 for permethrin and allylalcohol, slightly above 1 (i.e. 2.8) for caffeine and 21 for lindane. Considering the very high cv for lindane (517 for fish, 117 for invert), these data in summary indicate that the earlier observed weakness of the FCT is covered by the acute daphnids data. This includes the "famous" allylalcohol which becomes more toxic in fish compared to FCT due to biotransformation.
+
+```{r}
+
+test_filtered_ext <- test %>% 
+  filter(!str_detect(cas, "Metal")) %>% 
+  filter(effect_is_5x_above_water_solubility == "0") %>% 
+  filter(str_detect(trophic_level, "FISH|INVERT")) %>% 
+  select(-ends_with(c(".y"))) %>% 
+  filter(test_type == "A") %>% 
+  #mutate(duration_hours = as.numeric(duration_hours)) %>% 
+  filter(test_statistic == "LC50" | test_statistic == "EC50") %>% 
+  filter(str_detect(source, "embryo|larva|hatch|egg", negate = TRUE)) %>% 
+  filter(!str_detect(effect, "(?i)embryo|(?i)fetus"))%>% 
+  select(-duration, -duration_days) %>% 
+  separate(chemical_name, into = c("chemical_name", NA), sep = ";") %>%
+  mutate(effect = str_replace_all(effect, "Mortality, Mortality", "Mortality")) %>%
+  mutate(effect = str_replace_all(effect, "Mortality, Survival", "Mortality")) %>%
+  mutate(effect = str_replace_all(effect, "Mortality/Growth", "Mortality")) %>%
+  mutate(effect = str_replace_all(effect, "mortality and/ immobilisation", "Mortality")) %>%
+  mutate(effect = str_replace_all(effect, "mortality  and/ immobilisation", "Mortality")) %>%
+  mutate(effect = str_replace_all(effect, "Immobilization: Change in the failure to respond or lack of movement after mechanical stimulation.", "Immobilization")) %>%
+  mutate(effect = str_replace_all(effect, "Intoxication", "Immobilization")) %>%
+  mutate(effect = str_replace_all(effect, "Intoxication, Immobile", "Immobilization")) %>%
+  mutate(effect = str_replace_all(effect, "Immobilization, Immobile", "Immobilization")) %>%
+  mutate(effect = str_replace_all(effect, "Loss of equilibrium", "Immobilization")) %>%
+  mutate(effect = str_replace_all(effect, "loss of equilibrium", "Immobilization")) %>%
+  mutate(effect = str_replace_all(effect, "Mobility", "Immobilization")) %>%
+  mutate(effect = str_replace_all(effect, "mobility", "Immobilization")) %>%
+  select(-effect_is_5x_above_water_solubility, -source, -version, -reported_chemical_name)
+
+fish96_ext<-
+  test_filtered_ext %>% 
+  filter(str_detect(trophic_level, "FISH")) %>% 
+  filter((str_detect(latin_name, "(?i)danio rerio|(?i)pimephales promelas|(?i)Cyprinus carpio|(?i)Oryzias latipes|(?i)Poecilia reticulata|(?i)Lepomis macrochirus|(?i)Oncorhynchus mykiss|(?i)Gasterosteus aculeatus|(?i)Cyprinodon variegatus|(?i)Dicentrarchus labrax|(?i)Pagrus major"))) %>% 
+  filter(duration_hours == "96") %>% 
+  filter(str_detect(effect, "(?i)mort|(?i)intox|(?i)immobil|(?i)equilibrium"))%>%
+  filter(test_statistic == "LC50"|test_statistic == "EC50") %>%  
+  mutate(effect_value = as.numeric(effect_value))
+
+
+daph48_ext <- 
+  test_filtered_ext %>% 
+  filter(trophic_level == "INVERT") %>%
+  filter(str_detect(latin_name, "(?i)daphnia")) %>% 
+  filter(duration_hours %in% c("24", "48")) %>%
+  mutate(duration_hours = as.numeric(duration_hours))%>%
+  filter(str_detect(effect, "(?i)intox|(?i)mobil|(?i)mort"))%>% 
+  filter(test_statistic == "LC50"|test_statistic == "EC50") %>%
+   mutate(effect_value = as.numeric(effect_value))
+
+fish96_summarized_by_cas_ext <- fish96_ext %>% 
+  group_by(cas) %>% 
+  summarize(median_fish = median(effect_value, na.rm = TRUE),
+            mean_fish = mean(effect_value, na.rm = TRUE),
+            sd_fish = sd(effect_value, na.rm = TRUE),
+            cv_fish = (sd_fish/mean_fish)*100,
+            n_fish = n())
+
+daph48_summarized_by_cas_ext <- daph48_ext %>% 
+    group_by(cas) %>% 
+  summarize(median_daphn = median(effect_value, na.rm = TRUE),
+            mean_daphn = mean(effect_value, na.rm = TRUE),
+            sd_daphn = sd(effect_value, na.rm = TRUE),
+            cv_daphn = (sd_daphn/mean_daphn)*100,
+            n_daphn = n())
+
+ratios_by_cas_df_ext <- fish96_summarized_by_cas_ext %>%
+  left_join(daph48_summarized_by_cas_ext, by = "cas", suffix = c("_fish", "_daph")) %>%
+  mutate(geomean_ratio = (median_daphn/median_fish)) %>%
+  # filter(!is.na(geomean_ratio)) %>%
+  ungroup() %>%
+  left_join(substances_full, by = "cas")
+
+selected_ratios <-
+  ratios_by_cas_df_ext %>%
+  filter(cas == "58082" | cas == "52645531" | cas == "58899" | cas == "371404" | cas == "107186"| cas == "371404")%>%
+  select(chemical_name, cas, median_fish, cv_fish, n_fish, median_daphn, cv_daphn, n_daphn, geomean_ratio) %>% 
+  distinct()
+
+write_xlsx(selected_ratios, here::here("tables", "selected_ratios.xlsx"))
+
+
+ ratios_by_cas_df_ext %>%
+  filter(str_detect(chemical_name, "Lindan"))%>%
+  select(chemical_name, cas, median_fish, cv_fish, n_fish, median_daphn, cv_daphn, n_daphn, geomean_ratio) %>% 
+  distinct()
+
+```
+
+# 8. Check cyclodiene organochlorines
+
+```{r}
+
+ratios_df_reduced_preprocess %>% 
+  mutate(categorization_scheme = str_replace_all(categorization_scheme, schemes_replacements)) %>% 
+  filter(categorization_scheme == "EFSA") %>% 
+  filter(geomean_ratio >= 100) %>% 
+  select(chemical_name) %>% 
+  unique() %>% 
+  View()
+
+```
+
+# 9. Check if amphibian data in Envirotox are more sensitive compared to daphnids
+
+## 9.1. pre-filter including fish, daphnids, amphibians, algae
+
+```{r}
+test_filtered_FIAA <- test %>% 
+  filter(!str_detect(cas, "Metal")) %>% 
+  filter(effect_is_5x_above_water_solubility == "0") %>% 
+  filter(str_detect(trophic_level, "FISH|INVERT|AMPHIB|ALGAE")) %>% 
+  select(-ends_with(c(".y"))) %>% 
+  filter(test_type == "A") %>% 
+  mutate(duration_hours = as.numeric(duration_hours)) %>% 
+  filter(test_statistic == "LC50" | test_statistic == "EC50") %>% 
+  filter(str_detect(source, "embryo|larva|hatch|egg", negate = TRUE)) %>% 
+  filter(!str_detect(effect, "(?i)embryo|(?i)fetus"))%>% # added by MP
+  select(-duration, -duration_days) %>% 
+  separate(chemical_name, into = c("chemical_name", NA), sep = ";") %>%
+  select(-effect_is_5x_above_water_solubility, -source, -version, -reported_chemical_name)
+
+```
+
+## 9.2. final filtering including fish, daphnids, amphibians, algae
+
+```{r}
+
+fish96_FIAA <-
+  test_filtered_FIAA %>% 
+  filter(str_detect(trophic_level, "FISH")) %>% 
+  filter((str_detect(latin_name, "(?i)danio rerio|(?i)pimephales promelas|(?i)Cyprinus carpio|(?i)Oryzias latipes|(?i)Poecilia reticulata|(?i)Lepomis macrochirus|(?i)Oncorhynchus mykiss|(?i)Gasterosteus aculeatus|(?i)Cyprinodon variegatus|(?i)Dicentrarchus labrax|(?i)Pagrus major"))) %>% 
+  filter(duration_hours == "96") %>% 
+  filter(str_detect(effect, "(?i)mort|(?i)intox|(?i)immobil|(?i)equilibrium"))%>%
+  filter(test_statistic == "LC50"|test_statistic == "EC50") %>%  
+  mutate(effect_value = as.numeric(effect_value))
+
+daph48_FIAA <- test_filtered_FIAA %>% 
+  filter(trophic_level == "INVERT") %>%
+  filter(str_detect(latin_name, "(?i)daphnia")) %>% 
+  filter(duration_hours == "48") %>% 
+  filter(str_detect(effect, "(?i)intox|(?i)mobil"))%>% 
+  filter(test_statistic == "EC50")%>%
+  mutate(effect_value = as.numeric(effect_value))
+
+amphib96_allspecies <-test_filtered_FIAA %>% 
+  filter(trophic_level == "AMPHIB") %>%
+  filter(duration_hours == 48|duration_hours == 96) %>%
+  filter(str_detect(effect, "(?i)mort|(?i)mobil|(?i)development"))%>%
+  filter(test_statistic == "LC50"|test_statistic == "EC50")
+
+algae_all <-test_filtered_FIAA %>% 
+  filter(trophic_level == "ALGAE")  
+```
+
+### Correlation pointplot and linear regression for daphnids and amphibians
+
+```{r}
+
+daph48_FIAA_by_cas <- 
+  daph48_FIAA %>% 
+  group_by(cas) %>% 
+  summarize(median_daphn = median(effect_value, na.rm = TRUE),
+            mean_daphn = mean(effect_value, na.rm = TRUE),
+            sd_daphn = sd(effect_value, na.rm = TRUE),
+            cv_daphn = (sd_daphn/mean_daphn)*100,
+            n_daphn = n())
+
+amphib96_FIAA_by_cas <-
+amphib96_allspecies %>%
+  mutate(effect_value = as.numeric(effect_value)) %>% 
+  group_by(cas) %>% 
+  summarize(median_amph = median(effect_value, na.rm = TRUE),
+            mean_amph = mean(effect_value, na.rm = TRUE),
+            sd_amph = sd(effect_value, na.rm = TRUE),
+            cv_amph = (sd_amph/mean_amph)*100,
+            n_amph = n())
+
+line_labels_FIAA <- tibble(median_amph = c(100000,100000,100000),
+                      median_daphn = c(100000,1000000,10000000),
+                      label = c(">1", ">10", ">100"))
+
+pointplot_data_FIAA <-
+  daph48_FIAA_by_cas %>% 
+  left_join(amphib96_FIAA_by_cas, by = "cas", suffix = c("_daph", "_amph")) %>% 
+  left_join(unique(select(substances_full, cas, chemical_name)), by = "cas") %>% 
+  mutate(geomean_ratio = (median_daphn/median_amph)) %>%
+  filter(!is.na(geomean_ratio)) %>% 
+  mutate(label = ifelse(geomean_ratio >10, chemical_name, NA_character_),
+         color_category = case_when(
+           geomean_ratio < 10 ~ "Below 10",
+           geomean_ratio >= 10 & geomean_ratio <= 100 ~ "10 to 100",
+           geomean_ratio > 100 ~ "Above 100"))
+
+
+
+library(ggpmisc)
+
+pointplot_data_FIAA %>% 
+  ggplot(aes(x=median_amph, y=median_daphn))+
+  geom_point(aes(col = color_category), alpha = 0.8)+
+  geom_abline(slope = 1, intercept = 0)+
+  geom_abline(slope = 1, intercept = 1, linetype = 2)+
+  geom_abline(slope = 1, intercept = 2, linetype = 3)+
+  geom_label_repel(aes(label = label), max_overlaps = 20, nudge_x = 1, nudge_y =5)+
+  scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)))+
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)))+
+  scale_color_manual(values = c("10 to 100" = "orange","Above 100" = "red","Below 10" = "#80ed99"))+
+  guides(color = "none")+
+  labs(x = "Amphibian LC50, mg/L",
+       y = "Daphnids EC50, mg/L")+
+  geom_label(data = line_labels_FIAA, aes(x=median_amph, y=median_daphn, label = label), linetype = c(1,2,3))+
+  stat_poly_line(se = FALSE)+
+  stat_poly_eq(mapping = use_label(labels = c("eq", "R2")))
+  
+
+
+ggsave(plot = last_plot(), here::here("figures", "Pointplot-Amph96_vs._Daphn48_by_cas.png"), width = 140, height = 140, unit = "mm", dpi = 600)
+  
+
+```
+
+```{r}
+pointplot_data_FIAA %>% 
+  select(cas) %>% 
+  unique() %>% 
+  count()
+```
+
+## 9.3. Calculate frequency of effects and species within the selected data
+
+```{r}
+
+
+```
+
+```{r}
+fish_daph_amphib_algae_TGsepcies_0 <- rbind(fish96_FIAA, daph48_FIAA, amphib96_allspecies, algae_all)
+
+fish_daph_amphib_algae_percent_unique_effects_TGsepcies <- fish_daph_amphib_algae_TGsepcies_0 %>%
+  group_by(trophic_level, effect, duration_hours, test_statistic) %>%
+  summarise(Frequency = n()) %>%
+  ungroup()%>%
+  group_by(trophic_level)%>%
+    mutate(Percentage = round((Frequency / sum(Frequency)) * 100, 1)) %>%
+  arrange(trophic_level, desc(test_statistic), desc(Percentage))  
+
+ write_xlsx(fish_daph_amphib_algae_percent_unique_effects_TGsepcies, here::here("tables","fish_daph_amphib_algae_percent_unique_effects_TGsepcies.xlsx"))
+ 
+ 
+# calculate frequency of species within the selected data
+ 
+fish_daph_amphib_algae_percent_unique_TGsepcies <- fish_daph_amphib_algae_TGsepcies_0 %>%
+  group_by(trophic_level, latin_name) %>%
+  summarise(Frequency = n()) %>%
+  mutate(Percentage = round((Frequency / sum(Frequency)) * 100, 1)) %>%
+  arrange(trophic_level, desc(Percentage))
+
+ 
+ write_xlsx(fish_daph_amphib_algae_percent_unique_TGsepcies, here::here("tables","fish_daph_amphib_algae_percent_unique_TGsepcies.xlsx"))
+```
+
+### 9.4. Calculate n and % of per chemical median EC50 daphnids/EC50 amphibian ratios \> 1, 10 and 100
+
+```{r}
+
+  pointplot_data_FIAA %>% 
+    select(-color_category) %>% 
+  mutate(ratio_bracket = case_when(
+    geomean_ratio <= 1 ~ "<=1",
+    geomean_ratio > 1 & geomean_ratio <= 10 ~ ">1",
+    geomean_ratio > 10 & geomean_ratio <= 100 ~ ">10",
+    geomean_ratio > 100 ~ ">=100")) %>% 
+  count(ratio_bracket) %>% 
+  mutate(total_n = sum(n)) %>% 
+    mutate(percentage = round((n/total_n)*100,1)) %>% 
+write_xlsx(here::here("tables", "geomean_ratio_brackets_percents_daphnids-amphibians.xlsx"))
+
+```
+
+# Visualize CV across broad categories
+
+## #.#. Per chemical and species median EC50 daphnids/EC50 fish ratios
+
+```{r}
+
+fish96 %>% 
+  group_by(cas) %>% 
+  summarize(median_fish = median(effect_value, na.rm = TRUE),
+            mean_fish = mean(effect_value, na.rm = TRUE),
+            sd_fish = sd(effect_value, na.rm = TRUE),
+            cv_fish = (sd_fish/mean_fish)*100,
+            n_fish = n())
+
+
+fish96_combined <- fish96 %>% 
+  left_join(select(substances_full, cas, test_moa_reduced, aster_moa_reduced, kramer_moa_reduced, efsa_moa_reduced, irac_moa_reduced), by ="cas")%>%
+  mutate(test_moa_reduced = as.character(test_moa_reduced)) %>% 
+  mutate(aster_moa_reduced = as.character(aster_moa_reduced)) %>% 
+  mutate(irac_moa_reduced = as.character(irac_moa_reduced)) %>% 
+  mutate(kramer_moa_reduced = as.character(kramer_moa_reduced)) %>% 
+   mutate(test_moa_reduced = replace_na(test_moa_reduced, "No categorization")) %>% 
+  mutate(aster_moa_reduced = replace_na(aster_moa_reduced, "No categorization")) %>% 
+  mutate(irac_moa_reduced = replace_na(irac_moa_reduced, "No categorization")) %>% 
+  mutate(irac_moa_reduced = str_replace_all(irac_moa_reduced, "_", " ")) %>% 
+  mutate(efsa_moa_reduced = replace_na(efsa_moa_reduced, "No categorization")) %>% 
+  mutate(kramer_moa_reduced = replace_na(kramer_moa_reduced, "No categorization")) %>% 
+  mutate(
+    irac_moa_reduced = str_replace_all(
+      irac_moa_reduced, 
+      "nicotinic_acetylcholine_receptor_n_a_ch_r_competitive_modulators_neonicotinoids_other", 
+      "nAChR_interaction"
+    ),
+    irac_moa_reduced = str_replace_all(
+      irac_moa_reduced, 
+      "gaba_gated_chloride_channel_blockers_cyclodiene_organochlorines", 
+      "gaba_gated_ClC_blockers_cyclodiene_organochlorines"
+    ),
+    irac_moa_reduced = str_replace_all(
+      irac_moa_reduced,
+      "gaba_gated_chloride_channel_blockers_phenylpyrazoles_fiproles",
+      "gaba_gated_ClC_blockers_phenylpyrazoles_fiproles"
+  ),
+  irac_moa_reduced = str_replace_all(
+      irac_moa_reduced,
+      "voltage_dependent_sodium_channel_blockers_oxadiazines_semicarbazones",
+      "VGSC_blockers_oxadiazines_semicarbazones"
+  )) %>% 
+  pivot_longer(cols = c(test_moa_reduced, aster_moa_reduced, irac_moa_reduced, efsa_moa_reduced, kramer_moa_reduced), names_to = "categorization_scheme", values_to = "subcategory") %>% 
+  mutate(subcategory = str_replace_all(subcategory, "a ch e", "AChE")) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "n a ch r", "(nAChr)")) %>% 
+  mutate(categorization_scheme = str_replace_all(categorization_scheme, "_moa_reduced", "")) %>% 
+  mutate(categorization_scheme = toupper(categorization_scheme)) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "Ache", "AChE")) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "Nachr", "(nAChr)"))
+  
+reduce_subcategories_for_variability <- function(x){
+  case_when(
+    x == "AChE Inhibition" ~ "Neurotoxic",
+    x == "AChE Inhibitors" ~ "Neurotoxic",
+    x == "Carbamate Mediated AChE Inhibition" ~ "Neurotoxic",
+    x == "Irac Moa Other" ~ "Neurotoxic",
+    x == "Neuroactive" ~ "Neurotoxic",
+    x == "Neurotoxic" ~ "Neurotoxic",
+    str_detect(x, "Neurotoxicant:") ~ "Neurotoxic",
+    x == "Neurotoxicity" ~ "Neurotoxic",
+    x == "No Categorization" ~ x,
+    x == "Non-Neurotoxic" ~ x,
+    x == "Op Mediated AChE Inhibition" ~ "Neurotoxic",
+    x == "Organophosphates" ~ "Neurotoxic",
+    x == "Sodium Channel Modulators" ~ "Neurotoxic"
+  )
+}
+
+cv_plot_broad <- fish96_combined %>% 
+  mutate(reduced_category = reduce_subcategories_for_variability(subcategory)) %>% 
+  select(-subcategory, -categorization_scheme) %>% 
+  unique() %>% 
+  filter(cas %in% daph48$cas) %>% 
+  group_by(reduced_category, cas) %>% 
+  summarize(mean = mean(effect_value),
+            sd = sd(effect_value, na.rm = TRUE),
+            cv = (sd/mean)*100) %>% 
+  ggplot(aes(x=cv, y = reduced_category, col = reduced_category))+
+  geom_jitter(alpha = 0.8, size = 2, alpha = 0.2)+
+  geom_violin(color = "#000000", alpha = .8)+
+  geom_boxplot(color = "#000000", alpha = .5, outlier.alpha = 0)+
+  scale_color_manual(values = c("#f7a072", "#b5e2fa", "#0fa3b1"))+
+  scale_x_continuous(labels = scales::percent_format(scale = 1))+
+  labs(y="", x="Coefficient of Variation (CV)")+
+  theme(legend.position = "none")
+
+cv_plot_broad
+
+ggsave(plot = last_plot(), filename = "Variability boxplot neurotoxic vs not.png", path = here::here("figures"), height = 100, width = 180, units = "mm", device = "png")
+```
+
+```{r}
+cv_non_neurotox_selection <-
+  fish96_combined %>% 
+  filter(cas %in% daph48$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  mutate(subcategory = fct_collapse(subcategory, 
+                                    neurotoxic = c("AChE Inhibitors", "Irac Moa Other", "Organophosphates", "Sodium Channel Modulators"),
+                                    no_categorization = c("No Categorization"))) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "_", " ")) %>% 
+  filter(subcategory != "Neurotoxic") %>% 
+  select(cas) %>%
+  unique() 
+
+cv_neurotox_selection <-
+  fish96_combined %>% 
+  filter(cas %in% daph48$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  mutate(subcategory = fct_collapse(subcategory, 
+                                    neurotoxic = c("AChE Inhibitors", "Irac Moa Other", "Organophosphates", "Sodium Channel Modulators"),
+                                    no_categorization = c("No Categorization"))) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "_", " ")) %>% 
+  filter(subcategory == "Neurotoxic") %>% 
+  select(cas) %>% 
+  unique()
+  
+
+cv_non_neurotoxic <- fish96_combined %>% 
+  filter(cas %in% daph48$cas) %>% 
+  filter(cas %in% cv_non_neurotox_selection$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  group_by(latin_name, chemical_name, cas) %>% 
+  summarize(mean = mean(effect_value),
+         sd = sd(effect_value, na.rm = TRUE),
+         cv = (sd/mean),
+         n_data = n()) %>% 
+  mutate(subcategory = "No categorization")
+
+cv_neurotoxic <-   
+fish96_combined %>% 
+  filter(cas %in% daph48$cas) %>% 
+  filter(cas %in% cv_neurotox_selection$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  group_by(latin_name, chemical_name, cas) %>% 
+  summarize(mean = mean(effect_value),
+         sd = sd(effect_value, na.rm = TRUE),
+         cv = (sd/mean),
+         n_data = n()) %>% 
+  mutate(subcategory = "Neurotoxic")
+
+
+  
+cv_plot_irac <- cv_non_neurotoxic %>% 
+  rbind(cv_neurotoxic) %>% 
+  ggplot(aes(y=subcategory, x = cv))+
+  geom_jitter(aes(col = subcategory), fill = "darkgrey", size = 2, alpha =.8)+
+  geom_violin(color = "#000000", alpha = .8)+
+  geom_boxplot(color = "#000000", alpha = .5, outlier.alpha = 0)+
+  scale_color_manual(values = c("#c1121f", "#003049"))+
+  scale_x_continuous(labels = scales::percent)+
+  theme(legend.position = "none")+
+  labs(y="", x="Coefficient of Variation (CV)")
+
+cv_plot_irac
+
+ggsave(plot = last_plot(), filename = "CV IRAC only.png", path = here::here("figures"), height = 150, width = 200, units = "mm", device = "png")
+```
+
+```{r}
+cv_plot_broad + cv_plot_irac + plot_annotation(tag_levels = ("A"))
+
+ggsave(plot = last_plot(), filename = "Figure4-CV_violins_patchwork.png", path = here::here("figures"), height = 100, width = 300, units = "mm", device = "png")
+
+ggsave(plot = last_plot(), filename = "Figure4-CV_violins_patchwork.pdf", path = here::here("figures"), height = 100, width = 300, units = "mm", device = "pdf")
+
+ggsave(plot = last_plot(), filename = "Figure4-CV_violins_patchwork.jpg", path = here::here("figures"), height = 100, width = 300, units = "mm", device = "jpeg")
+```
+
+```{r}
+
+daph48_combined <- daph48 %>% 
+  left_join(select(substances_full, cas, test_moa_reduced, aster_moa_reduced, kramer_moa_reduced, efsa_moa_reduced, irac_moa_reduced), by ="cas")%>%
+  mutate(test_moa_reduced = as.character(test_moa_reduced)) %>% 
+  mutate(aster_moa_reduced = as.character(aster_moa_reduced)) %>% 
+  mutate(irac_moa_reduced = as.character(irac_moa_reduced)) %>% 
+  mutate(kramer_moa_reduced = as.character(kramer_moa_reduced)) %>% 
+  mutate(test_moa_reduced = replace_na(test_moa_reduced, "No categorization")) %>% 
+  mutate(aster_moa_reduced = replace_na(aster_moa_reduced, "No categorization")) %>% 
+  mutate(irac_moa_reduced = replace_na(irac_moa_reduced, "No categorization")) %>% 
+  mutate(irac_moa_reduced = str_replace_all(irac_moa_reduced, "_", " ")) %>% 
+  mutate(efsa_moa_reduced = replace_na(efsa_moa_reduced, "No categorization")) %>% 
+  mutate(kramer_moa_reduced = replace_na(kramer_moa_reduced, "No categorization")) %>% 
+  mutate(
+    irac_moa_reduced = str_replace_all(
+      irac_moa_reduced, 
+      "nicotinic_acetylcholine_receptor_n_a_ch_r_competitive_modulators_neonicotinoids_other", 
+      "nAChR_interaction"
+    ),
+    irac_moa_reduced = str_replace_all(
+      irac_moa_reduced, 
+      "gaba_gated_chloride_channel_blockers_cyclodiene_organochlorines", 
+      "gaba_gated_ClC_blockers_cyclodiene_organochlorines"
+    ),
+    irac_moa_reduced = str_replace_all(
+      irac_moa_reduced,
+      "gaba_gated_chloride_channel_blockers_phenylpyrazoles_fiproles",
+      "gaba_gated_ClC_blockers_phenylpyrazoles_fiproles"
+    ),
+    irac_moa_reduced = str_replace_all(
+      irac_moa_reduced,
+      "voltage_dependent_sodium_channel_blockers_oxadiazines_semicarbazones",
+      "VGSC_blockers_oxadiazines_semicarbazones"
+    )) %>% 
+  pivot_longer(cols = c(test_moa_reduced, aster_moa_reduced, irac_moa_reduced, efsa_moa_reduced, kramer_moa_reduced), names_to = "categorization_scheme", values_to = "subcategory") %>% 
+  mutate(subcategory = str_replace_all(subcategory, "a ch e", "AChE")) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "n a ch r", "(nAChr)")) %>% 
+  mutate(categorization_scheme = str_replace_all(categorization_scheme, "_moa_reduced", "")) %>% 
+  mutate(categorization_scheme = toupper(categorization_scheme)) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "Ache", "AChE")) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "Nachr", "(nAChr)"))
+
+reduce_subcategories_for_variability <- function(x){
+  case_when(
+    x == "AChE Inhibition" ~ "Neurotoxic",
+    x == "AChE Inhibitors" ~ "Neurotoxic",
+    x == "Carbamate Mediated AChE Inhibition" ~ "Neurotoxic",
+    x == "Irac Moa Other" ~ "Neurotoxic",
+    x == "Neuroactive" ~ "Neurotoxic",
+    x == "Neurotoxic" ~ "Neurotoxic",
+    str_detect(x, "Neurotoxicant:") ~ "Neurotoxic",
+    x == "Neurotoxicity" ~ "Neurotoxic",
+    x == "No Categorization" ~ x,
+    x == "Non-Neurotoxic" ~ x,
+    x == "Op Mediated AChE Inhibition" ~ "Neurotoxic",
+    x == "Organophosphates" ~ "Neurotoxic",
+    x == "Sodium Channel Modulators" ~ "Neurotoxic"
+  )
+}
+```
+
+# Species variability for IRAC
+
+We distinguish between chemicals with an assigned neurotoxic MoA by Irac and those without and with at least 4 tested species. Those selections are made first and used to filter the data for the two plots before they are generated separately. 30 Chemicals are used per plot.
+
+############################################################################################################################################################################################# 
+
+```{r}
+neurotox_selection <-
+  fish96_combined %>% 
+  filter(cas %in% daph48$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  mutate(subcategory = fct_collapse(subcategory, 
+                                    neurotoxic = c("AChE Inhibitors", "Irac Moa Other", "Organophosphates", "Sodium Channel Modulators"),
+                                    no_categorization = c("No Categorization"))) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "_", " ")) %>% 
+  filter(subcategory == "Neurotoxic") %>% 
+  count(cas, latin_name) %>% 
+  count(cas) %>% 
+  filter(n>4) %>% 
+  select(cas) %>% 
+  unique() %>% 
+  slice_sample(n=20)
+
+
+data_species_boxplot_neurotoxic <- fish96_combined %>% 
+  filter(cas %in% daph48$cas) %>% 
+  filter(cas %in% neurotox_selection$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  mutate(subcategory = fct_collapse(subcategory, 
+                                    neurotoxic = c("AChE Inhibitors", "Irac Moa Other", "Organophosphates", "Sodium Channel Modulators"))) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "_", " ")) %>% 
+  filter(subcategory == "Neurotoxic") %>% 
+  group_by(latin_name, chemical_name, cas) %>% 
+  mutate(mean = mean(effect_value),
+         sd = sd(effect_value, na.rm = TRUE),
+         cv = (sd/mean)*100,
+         n_data = n()) %>% 
+  ungroup() %>% 
+  mutate(axis_labeller = paste0(str_to_title(chemical_name), " (",cas,")"))
+  # mutate(axis_labeller = paste0(str_to_title(str_trunc(chemical_name, 12)), " (",cas,")")) 
+
+
+```
+
+```{r}
+
+non_neurotox_selection <-
+  fish96_combined %>% 
+  filter(cas %in% daph48$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  mutate(subcategory = fct_collapse(subcategory, 
+                                    neurotoxic = c("AChE Inhibitors", "Irac Moa Other", "Organophosphates", "Sodium Channel Modulators"),
+                                    no_categorization = c("No Categorization"))) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "_", " ")) %>% 
+  filter(subcategory != "Neurotoxic") %>% 
+  count(cas, latin_name) %>% 
+  count(cas) %>% 
+  filter(n>4) %>% 
+  select(cas) %>% 
+  unique() %>% 
+  slice_sample(n=20)
+  
+  
+data_species_boxplot_non_neurotoxic <- fish96_combined %>% 
+  filter(cas %in% daph48$cas) %>% 
+  filter(cas %in% non_neurotox_selection$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  mutate(subcategory = fct_collapse(subcategory, 
+                                    no_categorization = c("No Categorization"))) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "_", " ")) %>% 
+  filter(subcategory == "No categorization") %>% 
+  group_by(latin_name, chemical_name, cas) %>% 
+  mutate(mean = mean(effect_value),
+         sd = sd(effect_value, na.rm = TRUE),
+         cv = (sd/mean)*100,
+         n_data = n()) %>% 
+  ungroup() %>% 
+  mutate(axis_labeller = paste0(str_to_title(chemical_name), " (",cas,")"))
+  # mutate(axis_labeller = paste0(str_to_title(str_trunc(chemical_name, 12)), " (",cas,")"))
+
+
+```
+
+```{r}
+species_boxplots_combined <-
+  data_species_boxplot_non_neurotoxic %>% 
+    rbind(data_species_boxplot_neurotoxic) %>% 
+    ggplot(aes(y=fct_reorder(axis_labeller, mean), x = effect_value, fill = latin_name))+
+    geom_boxplot(outlier.size = 0.3)+
+    scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+                  labels = trans_format("log10", math_format(10^.x)))+
+    labs(x= "LC50, mg/L", y = "", fill = "Fish species")+
+    scale_fill_brewer(palette="Set3")+
+    guides(fill = guide_legend(ncol = 1))+
+    facet_wrap(subcategory~., scales = "free_y", ncol = 1)+
+    theme(legend.position.inside = c(0, 0),
+          strip.background = element_rect(color="black", fill="#FFFFFF", size=1.5, linetype=0),
+          legend.location = "plot",
+          legend.title = element_text(size=10),
+          legend.text = element_text(size=8, face = "italic"))
+  
+  species_boxplots_combined
+  
+  
+  ggsave(plot = last_plot(), filename = "Species_boxplot_FISH_patchwork.png", path = here::here("figures"), height = 350, width = 300, units = "mm", device = "png", limitsize = FALSE)
+  ggsave(plot =  species_boxplots_combined, filename = "Species_boxplot_FISH_patchwork.pdf", path = here::here("figures"), height = 350, width = 300, units = "mm", device = "pdf", limitsize = FALSE)
+```
+
+Statistical analysis of species differences per chemical
+
+```{r}
+
+non_neurotox_selection_all <-
+  fish96_combined %>% 
+  filter(cas %in% daph48$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  mutate(subcategory = fct_collapse(subcategory, 
+                                    neurotoxic = c("AChE Inhibitors", "Irac Moa Other", "Organophosphates", "Sodium Channel Modulators"),
+                                    no_categorization = c("No Categorization"))) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "_", " ")) %>% 
+  filter(subcategory != "Neurotoxic") %>% 
+  count(cas, latin_name) %>% 
+  count(cas) %>% 
+  filter(n>4) %>% 
+  select(cas) %>% 
+  unique()
+
+neurotox_selection_all <-
+  fish96_combined %>% 
+  filter(cas %in% daph48$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  mutate(subcategory = fct_collapse(subcategory, 
+                                    neurotoxic = c("AChE Inhibitors", "Irac Moa Other", "Organophosphates", "Sodium Channel Modulators"),
+                                    no_categorization = c("No Categorization"))) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "_", " ")) %>% 
+  filter(subcategory == "Neurotoxic") %>% 
+  count(cas, latin_name) %>% 
+  count(cas) %>% 
+  filter(n>4) %>% 
+  select(cas) %>% 
+  unique()
+
+data_species_boxplot_neurotoxic_stats <- fish96_combined %>% 
+  filter(cas %in% daph48$cas) %>% 
+  filter(cas %in% neurotox_selection_all$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  mutate(subcategory = fct_collapse(subcategory, 
+                                    neurotoxic = c("AChE Inhibitors", "Irac Moa Other", "Organophosphates", "Sodium Channel Modulators"))) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "_", " ")) %>% 
+  filter(subcategory == "Neurotoxic") %>% 
+  group_by(latin_name, chemical_name, cas) %>% 
+  mutate(mean = mean(effect_value),
+         sd = sd(effect_value, na.rm = TRUE),
+         cv = (sd/mean)*100,
+         n_data = n()) %>% 
+  ungroup()
+
+data_species_boxplot_non_neurotoxic_stats <- fish96_combined %>% 
+  filter(cas %in% daph48$cas) %>% 
+  filter(cas %in% non_neurotox_selection_all$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  mutate(subcategory = fct_collapse(subcategory, 
+                                    no_categorization = c("No Categorization"))) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "_", " ")) %>% 
+  filter(subcategory == "No categorization") %>% 
+  group_by(latin_name, chemical_name, cas) %>% 
+  mutate(mean = mean(effect_value),
+         sd = sd(effect_value, na.rm = TRUE),
+         cv = (sd/mean)*100,
+         n_data = n()) %>% 
+  ungroup()
+
+species_boxplot_data_combined_stats <- data_species_boxplot_non_neurotoxic_stats %>% 
+rbind(data_species_boxplot_neurotoxic_stats) 
+  
+
+species_differences_results <- tibble()
+
+
+sapply(X = unique(species_boxplot_data_combined_stats$cas), test_species_differences)
+
+
+test_species_differences <- function(chemical_cas){
+  
+this_chemical <- chemical_cas  
+
+print(paste("start", this_chemical))
+  
+this_data <- species_boxplot_data_combined_stats %>% 
+  filter(str_detect(cas, this_chemical)) 
+
+n_species <- this_data %>%
+  count(latin_name) %>% 
+  count(latin_name) %>% 
+  count()
+
+kruskal_results <- this_data %>% 
+  kruskal.test(effect_value ~ latin_name, data = .) %>% 
+  broom::tidy()
+
+this_plot <- this_data %>% 
+  add_count(latin_name) %>% 
+  mutate(y_label = paste0(latin_name, " (", n, ")")) %>% 
+  ggplot(aes(x=effect_value, y = fct_reorder(y_label,n), fill = latin_name))+
+  geom_density_ridges2(col = "#000000")+
+  scale_x_log10()+
+  scale_fill_brewer(palette = "Set2")+
+  theme(legend.position = "none")+
+  labs(x = "LC50, mg/L", y= "Species (N)", title = paste0(unique(this_data$chemical_name), " (", this_chemical,")"), subtitle = paste0(n_species," species; (p = ", round(kruskal_results$p.value, 5),")"))
+
+ggsave(plot = this_plot, filename = paste0("Ridgeline-species_differences_FISH",this_chemical,".png"), path = here::here("figures", "species_differences"), height = 200, width = 250, units = "mm", device = "png")
+
+this_results <-
+  tibble(chemical_name = unique(this_data$chemical_name),
+         cas = unique(this_data$cas),
+         category = unique(this_data$subcategory),
+                          number_of_species = pull(n_species)) %>% 
+  cbind(kruskal_results) %>% 
+    mutate(p_bracket = case_when(
+      p.value > 0.05 ~ "N.S.",
+      p.value <= 0.05 & p.value > 0.01 ~ "p<0.05",
+      p.value <= 0.01 & p.value > 0.001 ~ "p<0.01",
+      p.value <= 0.01 ~ "p<0.001",
+      TRUE ~ "CHECK"
+    ))
+
+
+
+species_differences_results <<-
+  species_differences_results %>%
+  rbind(this_results)
+
+print(paste("end",this_chemical))
+
+}
+
+```
+
+WriteKruskal-Wallis Test results to file:
+
+```{r}
+species_differences_results %>%  
+  writexl::write_xlsx(here::here("output", "Species_variability_tests_results-FISH.xlsx"))
+```
+
+Visualize Kruskal-Wallis test results across categories:
+
+```{r}
+
+p_bracket_reorder <- c("N.S.", "p<0.05", "p<0.01", "p<0.001")
+
+species_differences_results %>% 
+  count(category, p_bracket) %>% 
+  group_by(category) %>% 
+  mutate(total_n = sum(n)) %>% 
+  ungroup() %>% 
+  mutate(percent = round((n/total_n)*100,2)) %>% 
+  mutate(y_label = paste0(category, " (",total_n,")")) %>% 
+  mutate(percent_label = paste0(percent,"%")) %>% 
+  mutate(p_bracket = str_replace_all(p_bracket, "<", "p<")) %>% 
+  mutate(p_bracket = factor(p_bracket, levels=rev(p_bracket_reorder))) %>% 
+  ggplot(aes(y=y_label, x=percent, fill = p_bracket))+
+    geom_col(col = "darkgrey")+
+  scale_x_continuous(labels = scales::percent_format(scale = 1))+
+  scale_fill_manual(values = c("N.S." = "#264653",
+                               "p<0.05" = "#e9c46a",
+                               "p<0.01" = "#f4a261",
+                               "p<0.001" = "#e76f51"
+                               ))+
+    geom_text(aes(label = percent_label), size = 4, position = position_stack(vjust = 0.5))+
+  theme(legend.position = "bottom")+
+  labs(y="Category (Number of chemicals)",
+       fill = "Significance level",
+       x="Percent")
+
+
+
+ggsave(plot = last_plot(), filename = "Kruskal_wallis_results_species_differences.png", path = here::here("figures"), height = 100, width = 200, units = "mm", device = "png")
+
+
+```
+
+### Doing the same boxplot for daphnids, as comparison
+
+```{r}
+neurotox_selection_daph <-
+  daph48_combined %>% 
+  filter(cas %in% fish96$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  mutate(subcategory = fct_collapse(subcategory, 
+                                    neurotoxic = c("AChE Inhibitors", "Irac Moa Other", "Organophosphates", "Sodium Channel Modulators"),
+                                    no_categorization = c("No Categorization"))) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "_", " ")) %>% 
+  filter(subcategory == "Neurotoxic") %>% 
+  count(cas, latin_name) %>% 
+  count(cas) %>% 
+  filter(n>1) %>%
+  select(cas) %>% 
+  unique() %>% 
+  slice_sample(n=20)
+
+
+species_boxplot_neurotoxic_daph <- daph48_combined %>% 
+  filter(cas %in% fish96$cas) %>% 
+  filter(cas %in% neurotox_selection_daph$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  mutate(subcategory = fct_collapse(subcategory, 
+                                    neurotoxic = c("AChE Inhibitors", "Irac Moa Other", "Organophosphates", "Sodium Channel Modulators"))) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "_", " ")) %>% 
+  filter(subcategory == "Neurotoxic") %>% 
+  group_by(latin_name, chemical_name, cas) %>% 
+  mutate(mean = mean(effect_value),
+         sd = sd(effect_value, na.rm = TRUE),
+         cv = (sd/mean)*100,
+         n_data = n()) %>% 
+  ungroup() %>% 
+  mutate(axis_labeller = paste0(str_to_title(str_trunc(chemical_name, 12)), " (",cas,")")) %>% 
+  ggplot(aes(y=fct_reorder(axis_labeller, mean), x = effect_value, fill = latin_name))+
+  geom_boxplot(outlier.size = 0.3)+
+  scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)))+
+  labs(x= "EC50, mg/L", y = "Chemical name (CAS)", fill = "Daphnid species")+
+  scale_fill_brewer(palette="Set2")+
+  guides(fill = guide_legend(ncol = 1))+
+  facet_wrap(subcategory~., scales = "free_y", ncol = 1)+
+  theme(legend.position = c("none"),
+        legend.background = element_rect(fill = "white", color = "#000000"),
+        legend.title = element_text(size=10),
+        legend.text = element_text(size=8),
+        strip.background = element_rect(color="black", fill="#FFFFFF", size=1.5, linetype=0))
+
+species_boxplot_neurotoxic_daph
+
+ggsave(plot = last_plot(), filename = "Species boxplot DAPH IRAC only-neurotoxic.png", path = here::here("figures"), height = 250, width = 200, units = "mm", device = "png")
+```
+
+```{r}
+non_neurotox_selection_daph <-
+  daph48_combined %>% 
+  filter(cas %in% fish96$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  mutate(subcategory = fct_collapse(subcategory, 
+                                    neurotoxic = c("AChE Inhibitors", "Irac Moa Other", "Organophosphates", "Sodium Channel Modulators"),
+                                    no_categorization = c("No Categorization"))) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "_", " ")) %>% 
+  filter(subcategory != "Neurotoxic") %>% 
+  count(cas, latin_name) %>% 
+  count(cas) %>% 
+  filter(n>1) %>%
+  select(cas) %>% 
+  unique() %>% 
+  slice_sample(n=20)
+
+species_boxplot_non_neurotoxic_daph <- daph48_combined %>% 
+  filter(cas %in% fish96$cas) %>% 
+  filter(cas %in% non_neurotox_selection_daph$cas) %>% 
+  filter(categorization_scheme == "IRAC") %>% 
+  mutate(subcategory = fct_collapse(subcategory, 
+                                    no_categorization = c("No Categorization"))) %>% 
+  mutate(subcategory = str_to_title(subcategory)) %>% 
+  mutate(subcategory = str_replace_all(subcategory, "_", " ")) %>% 
+  filter(subcategory == "No categorization") %>% 
+  group_by(latin_name, chemical_name, cas) %>% 
+  mutate(mean = mean(effect_value),
+         sd = sd(effect_value, na.rm = TRUE),
+         cv = (sd/mean)*100,
+         n_data = n()) %>% 
+  ungroup() %>% 
+  mutate(axis_labeller = paste0(str_to_title(str_trunc(chemical_name, 12)), " (",cas,")")) %>% 
+  ggplot(aes(y=fct_reorder(axis_labeller, mean), x = effect_value, fill = latin_name))+
+  geom_boxplot(outlier.size = 0.3)+
+  scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)))+
+  labs(x= "EC50, mg/L", y = "", fill = "Daphnid species")+
+  scale_fill_brewer(palette="Set2")+
+  guides(fill = guide_legend(ncol = 1))+
+  facet_wrap(subcategory~., scales = "free_y", ncol = 1)+
+  theme(legend.position = "none",
+        legend.background = element_rect(fill = "white", color = "#000000"),
+        legend.title = element_text(size=10),
+        legend.text = element_text(size=8),
+        strip.background = element_rect(color="black", fill="#FFFFFF", size=1.5, linetype=0))
+
+species_boxplot_non_neurotoxic_daph
+    
+ggsave(plot = last_plot(), filename = "Species boxplot DAPH IRAC only-non_neurotoxic.png", path = here::here("figures"), height = 250, width = 200, units = "mm", device = "png")
+
+```
+
+```{r}
+species_boxplot_neurotoxic_daph + species_boxplot_non_neurotoxic_daph + plot_annotation(tag_levels = "A")
+
+ggsave(plot = last_plot(), filename = "Species_boxplot_DAPH_patchwork.png", path = here::here("figures"), height = 150, width = 250, units = "mm", device = "png")
+```
+
+# Compare summarizing and matching approaches
+
+Calculating ratio brackets for the different data summary and matching approaches
+
+## By CAS
+
+```{r}
+approach_comparison_by_cas <- fish96_summarized_by_cas %>% 
+left_join(daph48_summarized_by_cas, by = "cas", suffix = c("_fish", "_daph")) %>% 
+  filter(!is.na(median_daphn),
+         !is.na(median_fish)) %>% 
+  mutate(geomean_ratio = median_daphn/median_fish) %>% 
+  select(cas, geomean_ratio) %>% 
+  mutate(approach = "By CAS")
+```
+
+## By CAS and species
+
+```{r}
+fish96_summarized_by_cas_species <- fish96 %>%
+  group_by(cas, latin_name) %>%
+  summarize(median_fish = median(effect_value, na.rm = TRUE),
+            mean_fish = mean(effect_value, na.rm = TRUE),
+            sd_fish = sd(effect_value, na.rm = TRUE),
+            cv_fish = (sd_fish/mean_fish),
+            n_fish = n())
+
+
+daph48_summarized_by_cas_species <- daph48 %>% 
+  group_by(cas, latin_name) %>%
+  summarize(median_daphn = median(effect_value, na.rm = TRUE),
+            mean_daphn = mean(effect_value, na.rm = TRUE),
+            sd_daphn = sd(effect_value, na.rm = TRUE),
+            cv_daphn = (sd_daphn/mean_daphn),
+            n_daphn = n())
+
+
+approach_comparison_by_cas_species <- fish96_summarized_by_cas_species %>% 
+  left_join(daph48_summarized_by_cas_species, by = "cas", suffix = c("_fish", "_daph"), relationship = "many-to-many") %>% 
+  filter(!is.na(median_daphn),
+         !is.na(median_fish)) %>% 
+  mutate(geomean_ratio = median_daphn/median_fish) %>% 
+  select(cas, geomean_ratio) %>% 
+  mutate(approach = "By CAS and species")
+```
+
+## By CAS, species, and CAS
+
+```{r}
+fish96_summarized_by_cas_species_cas <-
+  fish96_summarized_by_cas_species %>% 
+  group_by(cas) %>% 
+  summarize(median_fish = median(median_fish))
+
+daph48_summarized_by_cas_species_cas <- 
+  daph48_summarized_by_cas_species %>% 
+  group_by(cas) %>% 
+  summarize(median_daphn = median(median_daphn))
+
+
+approach_comparison_by_cas_species_cas <- fish96_summarized_by_cas_species_cas %>% 
+  left_join(daph48_summarized_by_cas_species_cas, by = "cas") %>% 
+  filter(!is.na(median_daphn),
+         !is.na(median_fish)) %>% 
+  mutate(geomean_ratio = median_daphn/median_fish) %>% 
+  select(cas, geomean_ratio) %>% 
+  mutate(approach = "By CAS and species and CAS")
+```
+
+## Not summarized, all-to-all
+
+```{r}
+approach_comparison_all_to_all <-
+fish96 %>% 
+  left_join(daph48, by = "cas", relationship = "many-to-many", suffix = c("_fish", "_daph")) %>% 
+  filter(!is.na(effect_value_daph),
+         !is.na(effect_value_fish)) %>% 
+  mutate(geomean_ratio = effect_value_daph/effect_value_fish) %>% 
+  select(cas, geomean_ratio) %>% 
+  mutate(approach = "All-to-all")
+
+```
+
+## Combine the different data frames and assign ratio brackets
+
+```{r}
+approach_comparison_count <- approach_comparison_by_cas %>% 
+rbind(approach_comparison_by_cas_species) %>% 
+rbind(approach_comparison_by_cas_species_cas) %>% 
+  rbind(approach_comparison_all_to_all) %>% 
+  mutate(ratio_bracket = case_when(
+    geomean_ratio <= 1 ~ "<=1",
+    geomean_ratio > 1 & geomean_ratio <= 10 ~ ">1",
+    geomean_ratio > 10 & geomean_ratio <= 100 ~ ">10",
+    geomean_ratio > 100 ~ ">=100")) %>% 
+  count(approach, ratio_bracket) %>% 
+  group_by(approach) %>% 
+  mutate(total_n = sum(n)) %>% 
+  ungroup() %>% 
+  mutate(percentage = round((n/total_n)*100,1)) 
+```
+
+## Visualize distribution
+
+```{r}
+approach_order <- c(
+"By CAS",
+"By CAS and species",
+"By CAS and species and CAS",
+"All-to-all"
+)
+
+ratio_bracket_order <- c(
+"<=1",
+">1",
+">10",
+">=100"
+)
+
+approach_colors <- c("<=1" = "#80ed99",
+">1" = "#2a9d8f",
+">10" = "#e9c46a",
+">=100" = "#e76f51")
+
+approach_comparison_count %>% 
+  mutate(approach = factor(approach, levels=rev(approach_order))) %>% 
+  mutate(ratio_bracket = factor(ratio_bracket, levels=rev(ratio_bracket_order))) %>% 
+  mutate(approach_label = paste0(approach, " (", total_n,")")) %>% 
+  mutate(bar_label = ifelse(percentage > 6, percentage, NA_character_)) %>% 
+  ggplot(aes(y=approach_label, x = percentage, fill = ratio_bracket))+
+  geom_col(position = "stack", col = "darkgrey")+
+  labs(y="Approach (N)", x = "Percentage of median ratios", fill = "Ratio bracket")+
+  scale_fill_manual(values = approach_colors)+
+  scale_x_continuous(labels = scales::percent_format(scale = 1))+
+  geom_text(aes(label = bar_label), size = 4, position = position_stack(vjust = 0.5))+
+  theme(legend.position = "bottom")
+
+ggsave(plot = last_plot(), filename = "Approach_comparison_stacked_barchart_with_percentages.png", path = here::here("figures"), height = 150, width = 250, units = "mm", device = "png")
+
+```
+
+## Save percentage counts for brackets to file
+
+```{r}
+
+approach_comparison_count %>% 
+  mutate(percentage_n = paste0(percentage, " (",n,")")) %>% 
+  select(approach, ratio_bracket, percentage_n, total_n) %>% 
+  pivot_wider(names_from = "ratio_bracket", values_from = "percentage_n") %>% 
+  write_xlsx(here::here("tables", "percentages_table_matchin_approach_comparison.xlsx"))
+
+```
+
+## Ridgeline plot of the median ratios
+
+```{r}
+approach_comparison_by_cas %>% 
+rbind(approach_comparison_by_cas_species) %>% 
+rbind(approach_comparison_by_cas_species_cas) %>% 
+rbind(approach_comparison_all_to_all) %>% 
+  mutate(approach = factor(approach, levels=rev(approach_order))) %>% 
+  ggplot(aes(y=approach, x = geomean_ratio, fill = approach))+
+  geom_density_ridges2(color = "black")+
+  scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)))+
+  scale_fill_viridis_d()+
+  theme(legend.position = "none")+
+  geom_vline(xintercept = 1, linetype =1)+
+  geom_vline(xintercept = 10, linetype =2)+
+  geom_vline(xintercept = 100, linetype =3)+
+  labs(y="Approach", x = expression(paste(R["df"]," (median EC50 daphnid/median LC50 fish)", sep = "")))
+
+
+ggsave(plot = last_plot(), filename = "Approach_comparison_ridgeline.png", path = here::here("figures"), height = 150, width = 250, units = "mm", device = "png")
+```
+
+# Braunbeck data analysis
+
+```{r}
+df_braunbeck_raw <- readxl::read_xlsx(here::here("input", "Knoerr ECHA Datenbank sin Sonderzeichen k3.xlsx"), sheet = "Intra-Speziesvergleich") %>% 
+  janitor::clean_names() %>% 
+  mutate(cas = str_replace_all(substance_number, "-", ""))
+
+
+
+braunbeck_plot_per_chem <- df_braunbeck_raw %>% 
+  separate(effect_conc, into = c("effect_conc", "unit"), sep = " ") %>% 
+  mutate(effect_conc = as.numeric(effect_conc)) %>% 
+  group_by(substanzname) %>% 
+  summarize(median_fish = median(effect_conc),
+    mean_fish = mean(effect_conc),
+    sd_fish = sd(effect_conc),
+    cv_fish = (sd_fish/mean_fish)*100) %>% 
+  ggplot(aes(x=cv_fish))+
+  geom_histogram(color = "darkgrey", fill = "lightgrey")+
+  labs(title = "Per chemical")
+
+braunbeck_plot_per_chem_spec <- df_braunbeck_raw %>% 
+  separate(effect_conc, into = c("effect_conc", "unit"), sep = " ") %>% 
+  mutate(effect_conc = as.numeric(effect_conc)) %>% 
+  group_by(substanzname, test_species) %>% 
+  summarize(median_fish = median(effect_conc),
+    mean_fish = mean(effect_conc),
+    sd_fish = sd(effect_conc),
+    cv_fish = (sd_fish/mean_fish)*100) %>% 
+  ggplot(aes(x=cv_fish))+
+  geom_histogram(color = "darkgrey", fill = "lightgrey")+
+  labs(title = "Per chemical and species")
+
+braunbeck_plot_per_chem / braunbeck_plot_per_chem_spec + plot_annotation(tag_levels = "A")
+
+```
+
+```{r}
+
+braunbeck_summarized_by_cas <-
+  df_braunbeck_raw %>% 
+  separate(effect_conc, into = c("effect_conc", "unit"), sep = " ") %>% 
+  mutate(effect_conc = as.numeric(effect_conc)) %>% 
+  group_by(cas, substanzname) %>% 
+  summarize(median_fish = median(effect_conc),
+    mean_fish = mean(effect_conc),
+    sd_fish = sd(effect_conc),
+    cv_fish = (sd_fish/mean_fish)*100) %>% 
+    left_join(substances_full, by = "cas") %>% 
+    select(-c(7:16)) %>% 
+    pivot_longer(cols = c(7:11), names_to = "categorization_scheme", values_to = "subcategory") %>% 
+    filter(!is.na(subcategory)) 
+
+  braunbeck_summarized_by_cas %>% 
+  # filter(cas %in% ratios_all_df$cas) %>%
+  ggplot(aes(x=cv_fish, y = subcategory, col = subcategory))+
+  geom_jitter(alpha = 0.8, size = 2, alpha = 0.2)+
+  geom_violin(color = "#000000", alpha = .8)+
+  geom_boxplot(color = "#000000", alpha = .5, outlier.alpha = 0)+
+  scale_x_continuous(labels = scales::percent_format(scale = 1))+
+  labs(y="", x="Coefficient of Variation (CV)")+
+  theme(legend.position = "none")
+  
+  
+  ggsave(plot = last_plot(), filename = "Braunbeck_data_violin.png", path = here::here("figures"), height = 150, width = 250, units = "mm", device = "png")
+```
+
+```{r}
+
+```
+
+```{r}
+ratios_by_cas_df %>% 
+  filter(str_detect(chemical_name, "Roten")) 
+```
+
+```{r}
+ratios_by_cas_df_reduced_preprocess %>% 
+  write_xlsx(here::here("output", "Ratios_by_cas_df_preprocessed_data.xlsx"))
+```
